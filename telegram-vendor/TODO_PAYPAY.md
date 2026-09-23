@@ -13,8 +13,9 @@ Bot本体（購入→金額照合→受取→配布）は `MockPaymentProvider` 
   4桁SMS OTPは廃止され OTL方式に移行。
 - 対応方針（いずれか）:
   1. **推奨・当面の運用**: 別途取得済みの `access_token` を投入する経路を使う。
-     `PayPayService.adopt_token(access_token, refresh_token, device_uuid)` を
-     管理コマンド化すれば、ログイン作業なしで稼働できる（受取APIは動作見込み）。
+     管理コマンド **`/login_token <access_token>|<refresh_token>|<device_uuid>`**
+     を実装済み（個人チャット・管理者限定、メッセージ即削除、暗号化保存）。
+     `PayPayService.adopt_token()` 経由でログイン作業なしに稼働できる（受取APIは動作見込み）。
   2. 実機トラフィックを `tools/analyze_har.py` で解析し、現行の sign-in /
      OTL / token 交換のヘッダ・ペイロード・anti-bot トークンを
      `src/paypay/auth.py` と `client.py` に実装する。

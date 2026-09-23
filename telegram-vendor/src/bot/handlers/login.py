@@ -153,6 +153,57 @@ async def on_otp(message: Message, services: Container, state: FSMContext) -> No
         await message.answer("認証コードが正しくありません")
 
 
+@router.message(Command("login_token"))
+async def cmd_login_token(
+    message: Message, services: Container, state: FSMContext
+) -> None:
+    """Log in by directly supplying an access token (login-skip path).
+
+    Format (private chat, admin only):
+        /login_token <access_token>[|<refresh_token>][|<device_uuid>]
+
+    Use this until the anti-bot login flow is implemented (see TODO_PAYPAY.md).
+    The message is deleted immediately so the token never lingers in the chat.
+    """
+    if not services.is_admin(message.from_user.id):
+        return
+    if not _is_private(message):
+        await message.answer("/login_token は管理者との個人チャットでのみ実行できます。")
+        return
+
+    raw = message.text or ""
+    await _delete_silently(message)  # token must not linger in chat history
+
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "形式: /login_token <access_token>[|<refresh_token>][|<device_uuid>]"
+        )
+        return
+    fields = [f.strip() for f in parts[1].split("|")]
+    access_token = fields[0]
+    refresh_token = fields[1] if len(fields) > 1 and fields[1] else None
+    device_uuid = fields[2] if len(fields) > 2 and fields[2] else None
+
+    try:
+        await services.paypay.adopt_token(
+            access_token, refresh_token=refresh_token, device_uuid=device_uuid
+        )
+    except Exception:  # noqa: BLE001 - never echo token in the error
+        await state.clear()
+        await message.answer("トークンの設定に失敗しました。")
+        return
+    finally:
+        raw = access_token = ""  # noqa: F841 - drop references
+
+    await state.clear()
+    ready = await services.provider.is_ready()
+    await message.answer(
+        "アクセストークンを設定しました（PayPayログイン成功）。\n"
+        f"PaymentProvider: {'利用可能' if ready else '利用不可(要 PAYMENT_PROVIDER=paypay)'}"
+    )
+
+
 @router.message(Command("logout"))
 async def cmd_logout(message: Message, services: Container, state: FSMContext) -> None:
     if not services.is_admin(message.from_user.id):

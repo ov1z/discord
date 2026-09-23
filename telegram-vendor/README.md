@@ -11,9 +11,29 @@ Telegram 上で動作する**デジタル商品の自動販売Bot**です。
 - 決済は `PaymentProvider` 抽象で分離。`mock` と `paypay` を切替可能
 
 > **重要**: 本Botは *管理者本人が所有する PayPay アカウント* での利用を前提とします。
-> PayPay の新規ログインは現在サーバー側の Bot 検知により未接続の部分があります
-> （`TODO_PAYPAY.md` 参照）。**そのため既定は `mock` プロバイダで全フローが動作**し、
-> 実PayPayはアクセストークン投入または実装追補で有効化します。
+
+---
+
+## ⚠️ 現在の状態（「実APIですぐ動く？」への正直な回答）
+
+「実APIを探せばすぐ動く」わけでは **ありません**。部分ごとに状態が違います。
+
+| 部分 | 実装 | 実APIを入れたら |
+|------|------|-----------------|
+| **リンク確認 / 自動受取 / token refresh / alive** | 実装済み(確度: LIKELY) | **有効なアクセストークンがあればほぼ動く見込み**。実レスポンスで数フィールドの微調整が要る可能性 |
+| **新規ログイン（電話+パスワード→SMS/OTL 2FA）** | 未接続(確度: UNKNOWN) | **すぐには動かない**。PayPay の anti-bot 突破の解析・実装が必要（`TODO_PAYPAY.md` #1） |
+
+要するに:
+
+- **「受け取り側」はトークンさえ入れればすぐ動く設計**。
+  → `PAYMENT_PROVIDER=paypay` にして `/login_token <access_token>` でトークンを投入すれば、
+    購入→金額照合→自動受取→配布まで実PayPayで動作する見込み。
+- **「ログイン側（電話番号+パスワードでの新規ログイン）」は未完**。
+  → PayPay が 2025/11 以降ログインに Bot 検知を追加し、公開実装(PayPaython-mobile等)も
+    停止中。4桁SMS OTP も廃止され OTL(ワンタイムリンク)方式に移行済み。
+  → 完成させるには実機トラフィック解析が必要（手順は後述「実PayPay接続」）。
+
+**既定は `PAYMENT_PROVIDER=mock`** で、ネットワークなしに全フローが動作します（テスト36件パス）。
 
 ---
 
@@ -148,8 +168,15 @@ GGGG-HHHH-IIII
 - `/logout` でメモリ・保存セッションを削除
 - `/paypay_status` で状態確認
 
-> 現在 PayPay の新規ログイン2FAは anti-bot により未接続です（`TODO_PAYPAY.md`）。
-> 実運用ではアクセストークン投入経路（`PayPayService.adopt_token`）を使ってください。
+アクセストークン投入（新規ログインの代替・当面の推奨）:
+```
+/login_token <access_token>|<refresh_token(任意)>|<device_uuid(任意)>
+```
+- 個人チャット・管理者限定。メッセージは即削除、トークンは暗号化保存
+- 次回起動時に自動復元されます
+
+> 現在 PayPay の新規ログイン2FA（`/login` の最後）は anti-bot により未接続です
+> （`TODO_PAYPAY.md` #1）。実運用では上記 `/login_token` を使ってください。
 
 ---
 
@@ -178,20 +205,116 @@ python -m pytest -q          # 36 tests
 
 ## 実 PayPay 接続方法
 
-1. `.env` で `PAYMENT_PROVIDER=paypay`
-2. 有効な PayPay セッションを用意（下記いずれか）
-   - **推奨（当面）**: 取得済みアクセストークンを `PayPayService.adopt_token()` で投入
-   - `/login` フロー: 2FA 完了部分は `TODO_PAYPAY.md` の追補実装が必要
-3. 実行環境は **日本国内IP**（国外VMは PayPay 側 403。プロキシ利用）
-4. 実レスポンスを取得したら `tools/analyze_har.py` 等で解析し
-   `docs/paypay-api.md` を更新
+### 経路A: アクセストークン投入で「受け取り」を動かす（最短・推奨）
 
-安全設計:
-- リンク金額は**完全一致**のみ受取
+新規ログインの実装なしで、受け取りフローを実PayPayで動かせます。
+
+1. `.env` で `PAYMENT_PROVIDER=paypay`
+2. 有効な **access_token** を用意する（下記「トークンの入手」）
+3. Bot を起動し、管理者の**個人チャット**で:
+   ```
+   /login_token <access_token>|<refresh_token(任意)>|<device_uuid(任意)>
+   ```
+   - メッセージは即削除され、トークンは **Fernet 暗号化**で保存されます
+   - 次回以降は起動時に自動復元（`/paypay_status` で確認）
+4. `/paypay_status` が「ログイン済み / PaymentProvider: 利用可能」になれば準備完了
+5. 実行環境は **日本国内IP**（国外VMは PayPay 側 CloudFront 403。日本のプロキシ必須）
+
+> これで購入→金額照合→自動受取→配布まで実PayPayで動作する見込みです。
+> ただし `getP2PLinkInfo` / `acceptP2PSendMoneyLink` の実レスポンスは未実測(LIKELY)なので、
+> 最初の1件は少額でテストし、レスポンス差異があれば下記「解析」で `src/paypay/client.py`
+> の `_parse_link_info` を調整してください。
+
+#### トークンの入手（access_token）
+アクセストークンは約90日有効です。入手方法は環境により異なります:
+- 既存の PayPay 非公式ツール／自分で取得した OAuth トークンを流用
+- 実機トラフィックを解析して `/bff/v2/oauth2/token` のレスポンスから取得
+  （下記「経路B」の解析手順と同じ）
+
+### 経路B: 新規ログイン（/login フロー）を完成させる
+
+`電話番号:パスワード → SMS/OTL` の完全自動ログインを実装する場合。**要リバースエンジニアリング**。
+
+作業対象は `src/paypay/` のみ（Bot本体は変更不要）:
+
+1. 実機（Android/iOS）＋ mitmproxy + Frida(SSL unpin) で PayPay アプリの
+   ログイン通信をキャプチャ → `capture.har` を保存
+2. 解析:
+   ```bash
+   python tools/analyze_har.py capture.har --host paypay.ne.jp   # 各リクエストの構造
+   python tools/analyze_json.py response.json --schema           # レスポンス型
+   ```
+   （出力は秘密情報が自動 redact されます）
+3. `src/paypay/auth.py` / `src/paypay/client.py` を実装:
+   - `begin_login()`: PAR → sign-in ページ → password POST → 2FA(OTL)開始
+   - `submit_otp()`: OTL verify → `code-grant/update(COMPLETE_OTL)` →
+     `/bff/v2/oauth2/token` でトークン交換 → `PayPaySession` を返す
+   - anti-bot チャレンジのトークン生成をここに実装
+4. `docs/paypay-api.md` の該当項目を **UNKNOWN → CONFIRMED** に更新
+5. `PayPayClient` は httpx なので、テストは `httpx.MockTransport` を
+   `PayPayClient(transport=...)` に渡せばネットワークなしで書けます
+
+> 詳細な残タスクは **`TODO_PAYPAY.md`** に列挙してあります（#1〜#5）。
+
+### 安全設計（実API接続時に効く保護）
+- リンク金額は**完全一致**のみ受取（過不足はどちらも拒否）
 - 受取APIの成功だけで商品を渡さず、`get_payment_status` で**最終状態を再確認**
-- 通信断は `FAILED` にせず **`PAYMENT_UNKNOWN`**（二重受取事故を防止）
+- 通信断/timeout は `FAILED` にせず **`PAYMENT_UNKNOWN`**（二重受取事故を防止）
 - 同一リンクは UNIQUE 制約で**一度きり**
 - 送信失敗時も在庫を失わず `DELIVERING` で保持 → `/retry_delivery`・起動時再配布
+- Bot 検知緩和のため `PayPayClient.alive()` を用意（定期実行のスケジューリングは未設定=要追加）
+
+---
+
+## PC の Claude Code へ移行して続きを作る
+
+このリポジトリはそのまま PC に持っていけます。
+
+### 1. 取得
+```bash
+git clone <このリポジトリのURL>
+cd discord/telegram-vendor
+git checkout claude/telegram-paypay-vending-bot-1k18zf
+```
+
+### 2. 環境
+```bash
+python3 -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+# cryptography が _cffi_backend で失敗する環境では:
+pip install cffi
+```
+
+### 3. 設定
+```bash
+cp .env.example .env
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# 出力を .env の SESSION_ENCRYPTION_KEY に貼る
+# TELEGRAM_BOT_TOKEN と ADMIN_TELEGRAM_ID も設定
+```
+
+### 4. 動作確認
+```bash
+python -m pytest -q                  # 36 tests
+PYTHONPATH=src python src/main.py    # 起動（既定は mock プロバイダ）
+```
+
+### 5. Claude Code への依頼例（続きの実装）
+PC の Claude Code に、次のように頼めばそのまま続行できます:
+- 「`TODO_PAYPAY.md` の #1（新規ログイン2FA）を実装して。作業は `src/paypay/` だけ。
+  実機の `capture.har` を置くので `tools/analyze_har.py` で解析してから実装して」
+- 「実PayPayの `getP2PLinkInfo` レスポンス例（`response.json`）を渡すので、
+  `src/paypay/client.py` の `_parse_link_info` を実レスポンスに合わせて。
+  `docs/paypay-api.md` も CONFIRMED に更新して」
+- 「`alive()` を定期実行するスケジューラを追加して（Bot検知緩和）」
+
+### 参照すべきファイル（続きの起点）
+- `TODO.md` … 全体の実装状況
+- `TODO_PAYPAY.md` … PayPay実接続の残タスク（#1〜#5）
+- `docs/paypay-api.md` … 判明済みAPI仕様（確度付き）
+- `src/paypay/` … ここだけ直せば実API対応が完結する層
+- `tests/` … 挙動の仕様書も兼ねる（実装変更時の回帰確認に）
 
 ---
 
