@@ -16,24 +16,25 @@ Telegram 上で動作する**デジタル商品の自動販売Bot**です。
 
 ## ⚠️ 現在の状態（「実APIですぐ動く？」への正直な回答）
 
-「実APIを探せばすぐ動く」わけでは **ありません**。部分ごとに状態が違います。
+実PayPay接続に必要なコードは**すべて実装済み**です（2026年時点の実働実装ベース）。
 
-| 部分 | 実装 | 実APIを入れたら |
-|------|------|-----------------|
-| **リンク確認 / 自動受取 / token refresh / alive** | 実装済み(確度: LIKELY) | **有効なアクセストークンがあればほぼ動く見込み**。実レスポンスで数フィールドの微調整が要る可能性 |
-| **新規ログイン（電話+パスワード→SMS/OTL 2FA）** | 未接続(確度: UNKNOWN) | **すぐには動かない**。PayPay の anti-bot 突破の解析・実装が必要（`TODO_PAYPAY.md` #1） |
+| 部分 | 実装 | 状態 |
+|------|------|------|
+| **リンク確認 / 自動受取 / token refresh / alive** | 実装済み | CONFIRMED（実working実装ベース） |
+| **新規ログイン（電話+パスワード→SMS/OTL 2FA）** | 実装済み | CONFIRMED。**anti-bot(AWS WAF) は headless Chromium で突破** |
 
-要するに:
+- **anti-bot突破**: PayPay の sign-in は AWS WAF 配下。`src/paypay/auth.py` の
+  `get_waf_token()` が **Playwright(ヘッドレスChromium)で1回だけsign-inページを開き
+  `aws-waf-token` Cookie を取得** → 以降は httpx で OAuth/OTL を処理。
+  ブラウザは「WAFの通行証」を取る一瞬だけで、OTP・受取・送金には使いません。
+- **OTPは OTL(ワンタイムリンク)方式**（4桁SMS OTP は廃止）。届いたリンク/IDを `/login` 中に入力。
+- 実行は **日本国内IP** 必須（国外は CloudFront 403）。`playwright install chromium` が必要。
 
-- **「受け取り側」はトークンさえ入れればすぐ動く設計**。
-  → `PAYMENT_PROVIDER=paypay` にして `/login_token <access_token>` でトークンを投入すれば、
-    購入→金額照合→自動受取→配布まで実PayPayで動作する見込み。
-- **「ログイン側（電話番号+パスワードでの新規ログイン）」は未完**。
-  → PayPay が 2025/11 以降ログインに Bot 検知を追加し、公開実装(PayPaython-mobile等)も
-    停止中。4桁SMS OTP も廃止され OTL(ワンタイムリンク)方式に移行済み。
-  → 完成させるには実機トラフィック解析が必要（手順は後述「実PayPay接続」）。
+**既定は `PAYMENT_PROVIDER=mock`** で、ネットワーク/ブラウザなしに全フローが動作します
+（テスト37件パス）。実PayPayは `PAYMENT_PROVIDER=paypay` で有効化。
 
-**既定は `PAYMENT_PROVIDER=mock`** で、ネットワークなしに全フローが動作します（テスト36件パス）。
+> ⚠️ 実接続はまだ実口座での通し確認をしていません。最初は少額でテストし、
+> レスポンス差異があれば `src/paypay/client.py` の `_parse_link_info` を調整してください。
 
 ---
 
@@ -139,12 +140,22 @@ PYTHONPATH=src python src/main.py
 /product_delete 1                  # 無効化
 ```
 
-在庫管理（複数行で一括追加）:
+商品の注意事項（配布後に購入者へ商品と一緒に送られる）:
 ```
-/stock_add 1
+/product_note 1 初回起動時にライセンス認証を行ってください
+# 複数行も可:
+/product_note 1
+1行目の注意事項
+2行目の注意事項
+```
+
+在庫追加（1行1在庫。各行が別々の在庫として登録され、行がまとまることはない）:
+```
+/restock 1
 AAAA-BBBB-CCCC
 DDDD-EEEE-FFFF
 GGGG-HHHH-IIII
+# /stock_add でも同じ動作
 /stock_count 1
 /stock_list 1
 ```
@@ -231,30 +242,28 @@ python -m pytest -q          # 36 tests
 - 実機トラフィックを解析して `/bff/v2/oauth2/token` のレスポンスから取得
   （下記「経路B」の解析手順と同じ）
 
-### 経路B: 新規ログイン（/login フロー）を完成させる
+### 経路B: 電話番号+パスワードでログイン（`/login`・実装済み）
 
-`電話番号:パスワード → SMS/OTL` の完全自動ログインを実装する場合。**要リバースエンジニアリング**。
+anti-bot突破を含めて実装済みです。追加の実装は不要で、準備だけ:
 
-作業対象は `src/paypay/` のみ（Bot本体は変更不要）:
-
-1. 実機（Android/iOS）＋ mitmproxy + Frida(SSL unpin) で PayPay アプリの
-   ログイン通信をキャプチャ → `capture.har` を保存
-2. 解析:
-   ```bash
-   python tools/analyze_har.py capture.har --host paypay.ne.jp   # 各リクエストの構造
-   python tools/analyze_json.py response.json --schema           # レスポンス型
+1. `pip install playwright && playwright install chromium`（Chromium取得）
+2. `.env` で `PAYMENT_PROVIDER=paypay`、実行環境は**日本国内IP**
+3. Bot起動 → 管理者の**個人チャット**で:
    ```
-   （出力は秘密情報が自動 redact されます）
-3. `src/paypay/auth.py` / `src/paypay/client.py` を実装:
-   - `begin_login()`: PAR → sign-in ページ → password POST → 2FA(OTL)開始
-   - `submit_otp()`: OTL verify → `code-grant/update(COMPLETE_OTL)` →
-     `/bff/v2/oauth2/token` でトークン交換 → `PayPaySession` を返す
-   - anti-bot チャレンジのトークン生成をここに実装
-4. `docs/paypay-api.md` の該当項目を **UNKNOWN → CONFIRMED** に更新
-5. `PayPayClient` は httpx なので、テストは `httpx.MockTransport` を
-   `PayPayClient(transport=...)` に渡せばネットワークなしで書けます
+   /login
+   090xxxxxxxx:password        ← 電話番号:パスワード（送信後すぐ自動削除される）
+   <PayPayから届いたOTL(リンク/ID)>   ← 2FAが必要な場合のみ
+   ```
+4. 成功するとトークンが暗号化保存され、次回以降は起動時に自動復元
+5. 少額で受取を1件テストし、レスポンス差異があれば `src/paypay/client.py`
+   の `_parse_link_info` を調整（差異があれば `docs/paypay-api.md` も更新）
 
-> 詳細な残タスクは **`TODO_PAYPAY.md`** に列挙してあります（#1〜#5）。
+仕組み: `src/paypay/auth.py` が Playwrightで `aws-waf-token` を取得 → PAR →
+password → OTL 2FA → token交換。ブラウザはWAF通行証取得の一瞬のみ使用。
+
+> `PayPayClient` は httpx ベースなので、追加テストは `httpx.MockTransport` を
+> `PayPayClient(transport=...)` に渡せばネットワークなしで書けます。
+> 残タスク/注意は **`TODO_PAYPAY.md`** 参照。
 
 ### 安全設計（実API接続時に効く保護）
 - リンク金額は**完全一致**のみ受取（過不足はどちらも拒否）

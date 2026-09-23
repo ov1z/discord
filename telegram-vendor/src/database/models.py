@@ -86,6 +86,9 @@ class Product(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     price: Mapped[int] = mapped_column(Integer, nullable=False)  # JPY, integer yen
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Per-product note shown to the buyer AFTER the item is delivered
+    # (e.g. usage instructions / warnings).
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(

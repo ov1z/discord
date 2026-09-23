@@ -85,4 +85,8 @@ class PaymentInfo:
     sender_external_id: str | None = None
     has_password: bool = False
     expires_at: datetime | None = None
+    # Needed to build the accept request (from getP2PLinkInfo).
+    chat_room_id: str | None = None
+    message_id: str | None = None
+    request_id: str | None = None
     raw: dict = field(default_factory=dict)

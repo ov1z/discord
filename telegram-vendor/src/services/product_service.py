@@ -18,6 +18,7 @@ class ProductView:
     description: str | None
     active: bool
     available_stock: int
+    notes: str | None = None
 
 
 class ProductService:
@@ -34,6 +35,15 @@ class ProductService:
         async with self._sm() as session:
             updated = await ProductRepository(session).update_fields(
                 product_id, **fields
+            )
+            await session.commit()
+            return updated is not None
+
+    async def set_notes(self, product_id: int, notes: str) -> bool:
+        """Set the per-product note shown to buyers after delivery."""
+        async with self._sm() as session:
+            updated = await ProductRepository(session).update_fields(
+                product_id, notes=notes
             )
             await session.commit()
             return updated is not None
@@ -56,7 +66,7 @@ class ProductService:
             for p in await prepo.list_active():
                 stock = await irepo.count_available(p.id)
                 views.append(
-                    ProductView(p.id, p.name, p.price, p.description, p.active, stock)
+                    ProductView(p.id, p.name, p.price, p.description, p.active, stock, p.notes)
                 )
             return views
 
@@ -68,6 +78,6 @@ class ProductService:
             for p in await prepo.list_all():
                 stock = await irepo.count_available(p.id)
                 views.append(
-                    ProductView(p.id, p.name, p.price, p.description, p.active, stock)
+                    ProductView(p.id, p.name, p.price, p.description, p.active, stock, p.notes)
                 )
             return views

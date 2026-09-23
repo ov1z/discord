@@ -1,43 +1,35 @@
 # TODO: PayPay 実API 未実装・要確認事項
 
 Bot本体（購入→金額照合→受取→配布）は `MockPaymentProvider` で**完全に動作**します。
-以下は実PayPayへ接続する際に残っている作業です。`src/paypay/` 以外は変更不要です。
+PayPay実接続のコードも**実装済み**（2026年時点の実働実装ベース）。残るのは
+**実口座での通し確認**と微調整です。`src/paypay/` 以外は変更不要。
 
-## 1. 新規ログイン（電話番号+パスワード → 2FA） — **未完 / UNKNOWN**
+## 1. 新規ログイン（電話番号+パスワード → 2FA） — **実装済み / 要実口座確認**
 
-- 現状: `PayPayClient.begin_login()` は OAuth2 PAR までは投げるが、
-  その後の sign-in と 2FA(OTL) 完了は **PayPay側のBot検知**により公開実装でも
-  再現できないため、`submit_otp()` は `PayPayOTPRequired` を返して停止する。
-- 影響: `/login` のフルフロー（電話番号→SMS/OTL→トークン取得）は未完。
-- 参考: `PayPaython-mobile` READMEに「2025/11にBot検知追加、公開停止」明記。
-  4桁SMS OTPは廃止され OTL方式に移行。
-- 対応方針（いずれか）:
-  1. **推奨・当面の運用**: 別途取得済みの `access_token` を投入する経路を使う。
-     管理コマンド **`/login_token <access_token>|<refresh_token>|<device_uuid>`**
-     を実装済み（個人チャット・管理者限定、メッセージ即削除、暗号化保存）。
-     `PayPayService.adopt_token()` 経由でログイン作業なしに稼働できる（受取APIは動作見込み）。
-  2. 実機トラフィックを `tools/analyze_har.py` で解析し、現行の sign-in /
-     OTL / token 交換のヘッダ・ペイロード・anti-bot トークンを
-     `src/paypay/auth.py` と `client.py` に実装する。
+- 実装: `src/paypay/auth.py`
+  - `get_waf_token()`: Playwright(ヘッドレスChromium)で `aws-waf-token` を取得（anti-bot突破）
+  - `login_step1()`: PAR → authorize → password（既知デバイスはOTP不要でcode取得）
+  - `login_step2()`: OTL verify → COMPLETE_OTL/polling → `/bff/v2/oauth2/token` でトークン交換
+- `PayPayClient.begin_login()/submit_otp()` が上記を `asyncio.to_thread` で呼ぶ。
+  `/login`（電話→OTL）と `/login_token`（トークン直接投入）の両方が使用可能。
+- 前提: `playwright install chromium` / 日本国内IP。
+- [ ] 実口座で `/login` を通しで確認（OTP必要/不要の両分岐）
+- [ ] `login_step2` の verify/COMPLETE_OTL ペイロード分岐を実レスポンスで確定
+- [ ] （任意）account_id をログイン後 `getProfileDisplayInfo` から取得して表示
 
-### 必要な追加実装（経路2を採る場合）
-- [ ] `www.paypay.ne.jp` の sign-in ページ取得と anti-bot チャレンジ処理
-- [ ] `/portal/api/v2/oauth2/sign-in/password` へのPOST（現行ヘッダ）
-- [ ] OTL 2FA: `.../2fa/otl/verify` → `code-grant/update(COMPLETE_OTL)`
-- [ ] `/bff/v2/oauth2/token` でトークン交換（`codeVerifier`）
-- [ ] `submit_otp()` を上記に接続し `LoginStatus.SUCCESS` を返す
-
-## 2. token_refresh — **要実測 / LIKELY**
-- [ ] `/bff/v2/oauth2/token` の refresh ペイロード形状を実レスポンスで確認
+## 2. token_refresh — **実装済み / 要実測**
+- 実装: `/bff/v2/oauth2/refresh`（`grantType=refresh_token`）。`src/paypay/auth.py`
 - [ ] `token_expires_at` を実レスポンスの値に置換（現在は90日固定の推定値）
 
 ## 3. account_id / プロフィール — **未取得**
 - [ ] `/bff/v2/getProfileDisplayInfo` から `account_id` を取得して
       `PayPaySession.account_id` に格納（`/paypay_status` 表示用）
 
-## 4. link_check / link_receive — **要実測 / LIKELY**
-- [ ] `getP2PLinkInfo` / `acceptP2PSendMoneyLink` の実レスポンスで
-      `orderStatus` 値と受取後の最終状態を確認し、`_parse_link_info` を確定
+## 4. link_check / link_receive — **実装済み / 要実測**
+- 実装済み（実働実装ベースのフィールド: amount=`pendingP2PInfo.amount`,
+  orderId/requestId=`message.data.*`, messageId/chatRoomId=`message.*`,
+  orderStatus=`payload.orderStatus`）。受取後は `get_payment_status` で再確認。
+- [ ] 実リンクで `_parse_link_info` を確定（差異があれば修正）
 - [ ] パスコード付きリンクの取り扱い（現在は購入フローでは非対応前提）
 
 ## 5. 運用上の注意（実API接続時）

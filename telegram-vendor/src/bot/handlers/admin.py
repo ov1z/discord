@@ -40,9 +40,9 @@ async def cb_admin(callback: CallbackQuery, services: Container) -> None:
     action = callback.data.split(":", 1)[1]
     hints = {
         "products": "商品管理: /product_list /product_add 名前|価格|説明 "
-        "/product_edit id|field|value /product_delete id",
-        "stock": "在庫管理: /stock_add <product_id> (改行で複数) "
-        "/stock_count <product_id> /stock_list <product_id>",
+        "/product_edit id|field|value /product_note <id> 注意事項 /product_delete id",
+        "stock": "在庫管理: /restock <product_id> (改行で1行1在庫) "
+        "/stock_add も同じ /stock_count <product_id> /stock_list <product_id>",
         "orders": "注文管理: /orders /order ORD-XXXX "
         "/retry_delivery ORD-XXXX /cancel_order ORD-XXXX",
         "paypay_status": "/paypay_status を実行してください。",
@@ -127,6 +127,43 @@ async def cmd_product_edit(
     await message.answer("更新しました。" if ok else "商品が見つかりません。")
 
 
+@router.message(Command("product_note"))
+async def cmd_product_note(
+    message: Message, services: Container, command: CommandObject
+) -> None:
+    """Set the per-product note shown to buyers after delivery.
+
+    形式（1行）:   /product_note <product_id> 注意事項テキスト
+    形式（複数行）: /product_note <product_id>
+                    1行目の注意事項
+                    2行目の注意事項
+    """
+    if not _admin_only(message, services):
+        return
+    text = command.args or ""
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "形式: /product_note <product_id> 注意事項\n"
+            "（product_id の後に改行で複数行の注意事項も可）"
+        )
+        return
+    try:
+        product_id = int(parts[0].strip())
+    except ValueError:
+        await message.answer("product_id は整数で入力してください。")
+        return
+    if await services.products.get(product_id) is None:
+        await message.answer("指定の商品が見つかりません。")
+        return
+    notes = parts[1].strip()
+    ok = await services.products.set_notes(product_id, notes)
+    await message.answer(
+        "注意事項を設定しました。配布時に商品と一緒に送られます。"
+        if ok else "設定に失敗しました。"
+    )
+
+
 @router.message(Command("product_delete"))
 async def cmd_product_delete(
     message: Message, services: Container, command: CommandObject
@@ -145,19 +182,23 @@ async def cmd_product_delete(
 # --------------------------------------------------------------------------- #
 # Stock
 # --------------------------------------------------------------------------- #
-@router.message(Command("stock_add"))
-async def cmd_stock_add(
-    message: Message, services: Container, command: CommandObject
+async def _handle_stock_add(
+    message: Message, services: Container, command: CommandObject, cmd: str
 ) -> None:
+    """Bulk-add stock: first token = product_id, then ONE item per line.
+
+    各行が1つの在庫（デジタル商品）になります。2行目は別の在庫として登録され、
+    行同士がまとめられる（混同される）ことはありません。
+    """
     if not _admin_only(message, services):
         return
-    # First token = product_id; remaining lines = one item each.
     text = command.args or ""
     parts = text.split(maxsplit=1)
-    if not parts:
+    if not parts or not parts[0].strip():
         await message.answer(
-            "形式: /stock_add <product_id> の後に、改行で在庫を複数行入力\n"
-            "例:\n/stock_add 1\nAAAA\nBBBB\nCCCC"
+            f"形式: /{cmd} <product_id> の後に、改行で在庫を1行1つ入力\n"
+            f"例:\n/{cmd} 1\nAAAA-BBBB-CCCC\nDDDD-EEEE-FFFF\nGGGG-HHHH-IIII\n"
+            "（各行が別々の在庫として登録されます）"
         )
         return
     try:
@@ -167,13 +208,27 @@ async def cmd_stock_add(
         return
     body = parts[1] if len(parts) > 1 else ""
     if not body.strip():
-        await message.answer("追加する在庫を改行区切りで入力してください。")
+        await message.answer("追加する在庫を改行区切り（1行1つ）で入力してください。")
         return
     if await services.products.get(product_id) is None:
         await message.answer("指定の商品が見つかりません。")
         return
     added = await services.inventory.add_bulk(product_id, body)
-    await message.answer(f"{added}件の在庫を追加しました。")
+    await message.answer(f"商品ID {product_id} に {added}件の在庫を追加しました。")
+
+
+@router.message(Command("stock_add"))
+async def cmd_stock_add(
+    message: Message, services: Container, command: CommandObject
+) -> None:
+    await _handle_stock_add(message, services, command, "stock_add")
+
+
+@router.message(Command("restock"))
+async def cmd_restock(
+    message: Message, services: Container, command: CommandObject
+) -> None:
+    await _handle_stock_add(message, services, command, "restock")
 
 
 @router.message(Command("stock_count"))

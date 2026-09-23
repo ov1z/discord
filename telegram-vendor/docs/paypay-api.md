@@ -7,10 +7,18 @@
 - **LIKELY**: 公開実装（PayPaython-mobile 等）に記載があり整合的だが、当環境で実測未確認
 - **UNKNOWN**: 仕様不明、または現在サーバー側の保護で再現できない
 
-> 出典の一つである `PayPaython-mobile` は 2025/11 以降ログイン部分にBot検知が入り、
-> 公開コードのログインは動作停止と明記されています。したがって本Botの**新規ログインは
-> UNKNOWN 扱い**とし、`MockPaymentProvider` と「アクセストークン直接投入」経路で
-> 完成させています（TODO_PAYPAY.md 参照）。
+> **更新 (2026-07)**: 実働する Discord Bot 実装（2026年時点、`clientAppVersion 5.55.0`
+> / Android16）を解析し、**anti-bot(AWS WAF) を headless Chromium で突破**する方式で
+> 新規ログインを実装しました。これにより `begin_login`/`submit_otp`/`token_refresh`
+> は CONFIRMED（実働実装ベース）へ更新。ブラウザ自動操作は WAF Cookie 取得の一瞬のみで、
+> OTP・受取・送金はすべて httpx。
+
+### anti-bot (AWS WAF) — CONFIRMED
+- PayPay の sign-in ホスト(`www.paypay.ne.jp`)は AWS WAF 配下。
+- **突破方法**: Playwright(headless Chromium)で
+  `https://www.paypay.ne.jp/portal/oauth2/sign-in?client_id=pay2-mobile-app-client`
+  を1回ロードし、`aws-waf-token` Cookie を取得。以降その Cookie を付けて httpx で全処理。
+- 実装: `src/paypay/auth.py` `get_waf_token()`
 
 共通事項:
 - ホスト: `https://app4.paypay.ne.jp`（アプリAPI） / `https://www.paypay.ne.jp`（Web/OAuth）
@@ -39,25 +47,31 @@
 - **AUTH**: なし（ログイン前）
 - **REQUEST**: `clientId, clientAppVersion, redirectUri, responseType=code, codeChallenge, codeChallengeMethod=S256, scope=REGULAR, tokenVersion=v2`
 - **RESPONSE**: `payload.requestUri`
-- **ERRORS**: header.resultCode != S0000
-- **STATUS**: **UNKNOWN**（sign-in 以降が anti-bot 保護。4桁SMS OTP は廃止され OTL(ワンタイムリンク)方式へ）
+- **後続**: `GET /portal/api/v2/oauth2/authorize` → `par/check` →
+  `POST /portal/api/v2/oauth2/sign-in/password` (`{username, password, signInAttemptCount}`)
+  - 既知デバイス → `payload.redirectUrl` に `code=` が入り OTP 不要
+  - 未知デバイス → OTP(OTL) 必要
+- **STATUS**: **CONFIRMED**（実働実装ベース。要 aws-waf-token Cookie）
 
-## submit_otp / OTL 確認
+## submit_otp / OTL 2FA — CONFIRMED
 
-- **PATH**: `/portal/api/v2/oauth2/extension/sign-in/2fa/otl/verify` 他（www）
-  → `/bff/v2/oauth2/token`（app4）でトークン交換
-- **PURPOSE**: 2FA(OTL)完了とトークン取得
+- **トリガー**: `code-grant/update`(空) → `code-grant/update`(SELECT_FLOW, `flow=OTL`,
+  `sign_in_method=MOBILE`) → `.../side-channel/next-action-polling` で SMS 送信
+- **完了**: OTLリンク `GET /portal/oauth2/l?id=<code>` を消費 →
+  `POST /portal/api/v2/oauth2/extension/sign-in/2fa/otl/verify` (`{code}`) →
+  `code-grant/update`(`COMPLETE_OTL`) もしくは polling で認可 `code` 取得 →
+  `POST /bff/v2/oauth2/token` (`grantType=authorization_code, code, codeVerifier`)
 - **RESPONSE**: `payload.accessToken`, `payload.refreshToken`（access は約90日有効）
-- **STATUS**: **UNKNOWN**（現行保護のため未実装。TODO_PAYPAY.md）
+- **注**: 4桁SMS OTP は廃止。現行は OTL(ワンタイムリンク)。ユーザーは届いたリンク/IDを入力
+- **STATUS**: **CONFIRMED**
 
-## token_refresh
+## token_refresh — CONFIRMED
 
 - **METHOD**: POST
-- **PATH**: `/bff/v2/oauth2/token`
-- **PURPOSE**: refresh_token でアクセストークン更新
-- **REQUEST**: `clientId, refreshToken, grantType=refresh_token`
+- **PATH**: `/bff/v2/oauth2/refresh`  ← ※ `/token` ではない
+- **REQUEST**: `clientId, grantType=refresh_token, refreshToken, code=<refreshToken>, redirectUri`
 - **RESPONSE**: `payload.accessToken, payload.refreshToken`
-- **STATUS**: **LIKELY**（公開実装の記述に基づく。仕様変更の可能性あり）
+- **STATUS**: **CONFIRMED**（実働実装ベース）
 
 ## link_check (getP2PLinkInfo) — 金額確認
 
@@ -66,13 +80,14 @@
 - **PURPOSE**: 送金リンクの金額・状態・送信者を取得
 - **AUTH**: Bearer
 - **RESPONSE (抜粋)**:
-  - `payload.pendingP2PInfo.orderId`  … PayPay内部の注文ID
   - `payload.pendingP2PInfo.amount`   … 金額(int)
+  - `payload.pendingP2PInfo.senderName` … 送信者名
   - `payload.pendingP2PInfo.isSetPasscode` … パスコード有無
   - `payload.orderStatus` … `PENDING | SUCCESS | REJECTED | FAILED`
-  - `payload.sender.displayName / externalId`
+  - `payload.message.data.orderId`   … 受取に使う orderId
+  - `payload.message.data.requestId` … 受取に使う requestId（再利用）
   - `payload.message.messageId / chatRoomId`
-- **STATUS**: **LIKELY**（PayPaython-mobile 4.x と一致）
+- **STATUS**: **CONFIRMED**（実働実装ベース。orderId/requestId は message.data 側が正）
 
 ## link_receive (acceptP2PSendMoneyLink) — 自動受取
 
@@ -80,11 +95,11 @@
 - **PATH**: `/bff/v2/acceptP2PSendMoneyLink`
 - **PURPOSE**: 送金リンクを受け取る
 - **AUTH**: Bearer
-- **REQUEST**: `requestId(uuid), orderId, verificationCode, passcode?, senderMessageId, senderChannelUrl`
+- **REQUEST**: `requestId(link_infoのrequestId), orderId, verificationCode, senderMessageId(messageId), senderChannelUrl(chatRoomId), passcode?`
 - **RESPONSE**: `header.resultCode == S0000` で受取成功、`payload.orderId` 等
 - **注意**: 受取APIの成功レスポンスだけで完了とせず、`getP2PLinkInfo` で
   `orderStatus == SUCCESS` を**再確認**してから商品を渡すこと（本Bot実装済み）
-- **STATUS**: **LIKELY**
+- **STATUS**: **CONFIRMED**（実働実装ベース）
 
 ## alive（Bot検知回避のダミーリクエスト）
 

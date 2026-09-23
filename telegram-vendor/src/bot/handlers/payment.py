@@ -33,9 +33,12 @@ async def deliver_to_buyer(
 
     order = await container.orders.get(order_id)
     product_name = ""
+    product_notes: str | None = None
     if order is not None:
         product = await container.products.get(order.product_id)
-        product_name = product.name if product else ""
+        if product is not None:
+            product_name = product.name
+            product_notes = product.notes
 
     text = (
         "購入ありがとうございます。\n\n"
@@ -43,6 +46,9 @@ async def deliver_to_buyer(
         f"注文ID: {result.order_code}\n"
         f"決済金額: {result.expected_amount}円"
     )
+    # Per-product note / warnings shown right after the delivered item.
+    if product_notes and product_notes.strip():
+        text += f"\n\n⚠️ 注意事項:\n{product_notes.strip()}"
     try:
         await bot.send_message(buyer_chat_id, text)
     except Exception:  # noqa: BLE001 - Telegram send may fail for many reasons

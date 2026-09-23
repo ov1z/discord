@@ -14,23 +14,27 @@
 - [x] 購入フロー（商品選択→注文→リンク入力→金額照合→受取→自動配布）
 - [x] 在庫の原子的確保（同時購入で二重確保しない）
 - [x] 管理者機能（/admin, 商品/在庫/注文コマンド）
+- [x] `/restock <product_id>`（1行1在庫の一括追加。/stock_add と同義）
+- [x] 商品ごとの注意事項 `/product_note`（配布時に商品と一緒に購入者へ送信）
 
-### Phase 2 — PayPayログイン/セッション（構造完成・実接続は一部UNKNOWN）
+### Phase 2 — PayPayログイン/セッション（実装済み・要実口座確認）
 - [x] `PayPayClient`（httpx async, 秘密情報を保持/ログ/例外に出さない）
 - [x] `/login` FSM（WAITING_CREDENTIALS → WAITING_OTP）、Private Chat限定、管理者限定
 - [x] 認証情報メッセージの即時削除、DB/ログ/例外へ非出力
 - [x] `PayPaySessionStore`（Fernet暗号化・平文保存なし）
 - [x] 起動時セッション復元 + 期限切れ時 refresh 試行
 - [x] `/logout`, `/paypay_status`（トークン本体は非表示）
-- [~] 新規ログインの2FA完了は PayPay の anti-bot により **UNKNOWN**
-      （`adopt_token` によるアクセストークン投入で運用可能）→ TODO_PAYPAY.md
+- [x] `/login_token`（アクセストークン直接投入の代替経路）
+- [x] **新規ログイン実装済み**: anti-bot(AWS WAF)を headless Chromium で突破 →
+      PAR/password/OTL 2FA/token交換（`src/paypay/auth.py`）
+- [ ] 実口座での通し確認（TODO_PAYPAY.md #1）
 
-### Phase 3 — PayPayリンク確認/受取（構造完成・実接続は LIKELY）
-- [x] `inspect_payment`（getP2PLinkInfo）→ `PaymentInfo` 正規化
+### Phase 3 — PayPayリンク確認/受取（実装済み・要実測）
+- [x] `inspect_payment`（getP2PLinkInfo）→ `PaymentInfo` 正規化（実働実装フィールド）
 - [x] 金額完全一致チェック、受取可能判定
 - [x] `accept_payment`（acceptP2PSendMoneyLink）
 - [x] 受取後 `get_payment_status` で最終状態を**再確認**してから PAID
-- [~] 実レスポンス実測は未（LIKELY）→ docs/paypay-api.md
+- [ ] 実リンクで `_parse_link_info` 確定（TODO_PAYPAY.md #4）
 
 ### Phase 4 — 異常系 / 復旧 / 冪等性（完了）
 - [x] `PAYMENT_UNKNOWN`（timeout/通信断で FAILED にしない）

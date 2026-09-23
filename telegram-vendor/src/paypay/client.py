@@ -3,23 +3,24 @@
 This is the ONLY place that talks HTTP to PayPay. Everything else uses the
 typed models in paypay/models.py, so an API change is contained here.
 
-Confidence (see docs/paypay-api.md):
-  * link_check / link_receive / token_refresh / alive  -> LIKELY (endpoints
-    documented by public wrappers, subject to change)
-  * begin_login / submit_otp                           -> UNKNOWN (protected
-    by an anti-bot layer; may not complete on a fresh device)
+Login (begin_login/submit_otp) delegates to paypay/auth.py, which bypasses the
+AWS WAF with a one-shot headless Chromium page load and then drives the OAuth2
+PAR + OTL(one-time-link) 2FA flow over httpx. Those steps are synchronous and
+run in a worker thread; the authenticated link/refresh calls below are async.
 
-Secrets handling: phone / password / OTP are used only as local arguments,
-never stored on the instance, never logged, never put in exceptions.
+Secrets: phone / password / OTP are only local arguments; never stored on the
+instance, never logged, never placed in exceptions.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from paypay import auth
+from paypay.auth import LoginFailed, extract_verification_code, is_paypay_link  # re-export
 from paypay.exceptions import (
     PayPayAlreadyAccepted,
     PayPayAuthError,
@@ -39,34 +40,17 @@ from paypay.models import (
 
 logger = logging.getLogger("paypay.client")
 
-# PayPay access tokens are long-lived (~90 days). We treat them as expiring
-# defensively so refresh/relogin logic has a target even if the API omits it.
+# PayPay access tokens are long-lived (~90 days). Treated defensively.
 _DEFAULT_TOKEN_TTL = timedelta(days=90)
 
-
-def _strip_link(url: str) -> str:
-    """Extract the P2P verification code from a link or return it as-is."""
-    url = url.strip()
-    for prefix in (
-        "https://pay.paypay.ne.jp/",
-        "http://pay.paypay.ne.jp/",
-        "https://www.paypay.ne.jp/",
-    ):
-        if url.startswith(prefix):
-            url = url[len(prefix) :]
-    return url.split("?")[0].strip("/")
-
-
-def is_paypay_link(url: str) -> bool:
-    url = url.strip().lower()
-    return "pay.paypay.ne.jp/" in url
+__all__ = ["PayPayClient", "extract_verification_code", "is_paypay_link"]
 
 
 class PayPayClient:
     def __init__(
         self,
         session: PayPaySession | None = None,
-        timeout: float = 15.0,
+        timeout: float = 20.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._session = session
@@ -74,10 +58,8 @@ class PayPayClient:
         self._transport = transport
         self._http: httpx.AsyncClient | None = None
         self.last_api_call_at: datetime | None = None
-        # Transient login state (never persisted).
-        self._pending_code_verifier: str | None = None
-        self._pending_client_uuid: str | None = None
-        self._pending_device_uuid: str | None = None
+        # Transient login context (cookies/cv/uuids); never persisted.
+        self._login_ctx: dict | None = None
 
     # ----------------------------------------------------------------- infra
     @property
@@ -118,8 +100,7 @@ class PayPayClient:
 
     @staticmethod
     def _check_header(data: dict) -> None:
-        header = data.get("header", {})
-        code = header.get("resultCode")
+        code = data.get("header", {}).get("resultCode")
         if code in (None, "S0000", "S4002"):
             return
         if code == "S0001":
@@ -128,9 +109,7 @@ class PayPayClient:
 
     async def _get(self, path: str, *, params: dict, headers: dict) -> dict:
         try:
-            resp = await self.http.get(
-                auth.API_BASE + path, params=params, headers=headers
-            )
+            resp = await self.http.get(auth.API_BASE + path, params=params, headers=headers)
             data = resp.json()
         except httpx.HTTPError as exc:
             raise PayPayNetworkError(f"network error: {type(exc).__name__}") from exc
@@ -158,87 +137,62 @@ class PayPayClient:
 
     # ----------------------------------------------------------------- login
     async def begin_login(self, phone: str, password: str) -> LoginResult:
-        """Start login. Returns SUCCESS / OTP_REQUIRED / FAILED.
+        """Start login. Returns SUCCESS (rare, known device) or OTP_REQUIRED.
 
-        A fresh-device login triggers PayPay's OTL 2FA. This performs the PAR
-        request and password sign-in, then reports OTP_REQUIRED so the caller
-        can collect the one-time code/link and call ``submit_otp``.
-
-        The credentials are used only within this call.
+        Credentials are used only within this call and the worker thread.
         """
-        verifier, challenge = auth.generate_pkce_pair()
-        client_uuid = auth.new_uuid()
-        device_uuid = auth.new_uuid()
-        self._pending_code_verifier = verifier
-        self._pending_client_uuid = client_uuid
-        self._pending_device_uuid = device_uuid
-
-        headers = auth.base_headers(client_uuid, device_uuid)
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-        par_payload = {
-            "clientId": auth.CLIENT_ID,
-            "clientAppVersion": auth.APP_VERSION,
-            "clientOsVersion": "29.0.0",
-            "clientOsType": "ANDROID",
-            "redirectUri": auth.REDIRECT_URI,
-            "responseType": "code",
-            "codeChallenge": challenge,
-            "codeChallengeMethod": "S256",
-            "scope": "REGULAR",
-            "tokenVersion": "v2",
-            "prompt": "",
-            "uiLocales": "ja",
-        }
+        device_uuid = (self._session.device_uuid if self._session else None) or auth.new_uuid()
+        client_uuid = (self._session.client_uuid if self._session else None) or auth.new_uuid()
         try:
-            resp = await self.http.post(
-                f"{auth.API_BASE}/bff/v2/oauth2/par",
-                data=par_payload,
-                params={"payPayLang": "ja"},
-                headers=headers,
+            result = await asyncio.to_thread(
+                auth.login_step1, phone, password, device_uuid, client_uuid
             )
-            data = resp.json()
-        except httpx.HTTPError as exc:
-            raise PayPayNetworkError("network error during login") from exc
-        except ValueError as exc:
-            raise PayPayAuthError("unexpected login response") from exc
-        finally:
-            self.last_api_call_at = datetime.now(timezone.utc)
+        except LoginFailed as exc:
+            return LoginResult(status=LoginStatus.FAILED, message=str(exc))
+        except Exception as exc:  # noqa: BLE001 - never leak internals/secrets
+            logger.warning("login_step1 error: %s", type(exc).__name__)
+            return LoginResult(status=LoginStatus.FAILED, message="PayPayログインに失敗しました")
 
-        if data.get("header", {}).get("resultCode") != "S0000":
-            # Do NOT surface raw PayPay error (may echo credentials).
-            logger.warning("PAR request rejected by PayPay")
-            return LoginResult(
-                status=LoginStatus.FAILED,
-                message="PayPayログインを開始できませんでした",
-            )
+        if result["status"] == "SUCCESS":
+            self._adopt(result["access_token"], result.get("refresh_token"),
+                        device_uuid, client_uuid)
+            self._login_ctx = None
+            return LoginResult(status=LoginStatus.SUCCESS, message="PayPayログイン成功")
 
-        request_uri = data.get("payload", {}).get("requestUri")
-        # The subsequent sign-in + OTL 2FA is protected by an anti-bot layer
-        # that public wrappers no longer bypass reliably. We signal that a
-        # second factor is required so the FSM can proceed; submit_otp attempts
-        # to complete it. See TODO_PAYPAY.md.
-        return LoginResult(
-            status=LoginStatus.OTP_REQUIRED,
-            message="SMS/ワンタイム認証が必要です",
-            otp_reference=request_uri,
-        )
+        self._login_ctx = result["ctx"]
+        return LoginResult(status=LoginStatus.OTP_REQUIRED, message="SMS/OTL認証が必要です")
 
     async def submit_otp(self, otp: str) -> LoginResult:
-        """Complete 2FA with an SMS code or a one-time-link (OTL) id/URL.
-
-        Returns SUCCESS and populates the session on success.
-        Raises PayPayOTPRequired if the code is wrong/expired.
-        """
-        if self._pending_code_verifier is None:
+        """Complete OTL/SMS 2FA and populate the session."""
+        if self._login_ctx is None:
             raise PayPayAuthError("no login in progress")
+        ctx = self._login_ctx
+        try:
+            tokens = await asyncio.to_thread(auth.login_step2, ctx, otp)
+        except LoginFailed as exc:
+            raise PayPayOTPRequired(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("login_step2 error: %s", type(exc).__name__)
+            raise PayPayError("PayPayログインに失敗しました") from exc
 
-        # PayPay's current 2FA is OTL-based. We attempt to verify the code and
-        # exchange it for tokens. If PayPay's protection blocks this, a network
-        # / auth error is raised with a safe message.
-        raise PayPayOTPRequired(
-            "自動ログインの最終処理は現在の PayPay 保護により未対応です "
-            "(TODO_PAYPAY.md 参照)。アクセストークンによるログインを利用してください。"
+        self._adopt(tokens["access_token"], tokens.get("refresh_token"),
+                    ctx["device_uuid"], ctx["client_uuid"])
+        self._login_ctx = None
+        return LoginResult(status=LoginStatus.SUCCESS, message="PayPayログイン成功")
+
+    def _adopt(
+        self, access_token: str, refresh_token: str | None,
+        device_uuid: str, client_uuid: str,
+    ) -> PayPaySession:
+        session = PayPaySession(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            device_uuid=device_uuid,
+            client_uuid=client_uuid,
+            token_expires_at=datetime.now(timezone.utc) + _DEFAULT_TOKEN_TTL,
         )
+        self._session = session
+        return session
 
     def login_with_token(
         self,
@@ -248,54 +202,32 @@ class PayPayClient:
         client_uuid: str | None = None,
     ) -> PayPaySession:
         """Adopt an externally-obtained access token (login skip)."""
-        session = PayPaySession(
-            access_token=access_token,
-            refresh_token=refresh_token,
-            device_uuid=device_uuid or auth.new_uuid(),
-            client_uuid=client_uuid or auth.new_uuid(),
-            token_expires_at=datetime.now(timezone.utc) + _DEFAULT_TOKEN_TTL,
+        return self._adopt(
+            access_token, refresh_token,
+            device_uuid or auth.new_uuid(), client_uuid or auth.new_uuid(),
         )
-        self._session = session
-        return session
 
     async def token_refresh(self) -> PayPaySession:
-        """Refresh the access token using the stored refresh token."""
         s = self._require_auth()
         if not s.refresh_token:
             raise PayPaySessionExpired("no refresh token available")
-        headers = auth.base_headers(
-            s.client_uuid or auth.new_uuid(), s.device_uuid or auth.new_uuid()
-        )
-        payload = {
-            "clientId": auth.CLIENT_ID,
-            "refreshToken": s.refresh_token,
-            "grantType": "refresh_token",
-        }
         try:
-            resp = await self.http.post(
-                f"{auth.API_BASE}/bff/v2/oauth2/token",
-                data=payload,
-                params={"payPayLang": "ja"},
-                headers=headers,
+            access_token, refresh_token = await asyncio.to_thread(
+                auth.refresh_access_token,
+                s.refresh_token,
+                s.device_uuid or auth.new_uuid(),
+                s.client_uuid or auth.new_uuid(),
             )
-            data = resp.json()
-        except httpx.HTTPError as exc:
+        except LoginFailed as exc:
+            raise PayPaySessionExpired(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
             raise PayPayNetworkError("network error during refresh") from exc
-        except ValueError as exc:
-            raise PayPaySessionExpired("unexpected refresh response") from exc
-        finally:
-            self.last_api_call_at = datetime.now(timezone.utc)
-
-        if data.get("header", {}).get("resultCode") != "S0000":
-            raise PayPaySessionExpired("refresh rejected")
-        p = data.get("payload", {})
-        s.access_token = p.get("accessToken", s.access_token)
-        s.refresh_token = p.get("refreshToken", s.refresh_token)
+        s.access_token = access_token
+        s.refresh_token = refresh_token or s.refresh_token
         s.token_expires_at = datetime.now(timezone.utc) + _DEFAULT_TOKEN_TTL
         return s
 
     async def alive(self) -> bool:
-        """Lightweight authenticated call to confirm the session works."""
         try:
             await self._get(
                 "/bff/v1/getGlobalServiceStatus",
@@ -308,7 +240,7 @@ class PayPayClient:
 
     # ------------------------------------------------------------------ links
     async def link_check(self, url: str) -> PaymentInfo:
-        code = _strip_link(url)
+        code = extract_verification_code(url)
         if not code:
             raise PayPayInvalidLink("empty link")
         data = await self._get(
@@ -322,14 +254,11 @@ class PayPayClient:
     def _parse_link_info(code: str, data: dict) -> PaymentInfo:
         try:
             payload = data["payload"]
-            pending = payload.get("pendingP2PInfo", {})
+            pending = payload.get("pendingP2PInfo", {}) or {}
+            message = payload.get("message", {}) or {}
+            msg_data = message.get("data", {}) or {}
             amount = int(pending.get("amount"))
-            order_id = pending.get("orderId")
-            has_password = bool(pending.get("isSetPasscode", False))
-            sender = payload.get("sender", {})
-            raw_status = payload.get("orderStatus") or payload.get("message", {}).get(
-                "data", {}
-            ).get("status")
+            raw_status = payload.get("orderStatus") or msg_data.get("status")
         except (KeyError, TypeError, ValueError) as exc:
             raise PayPayInvalidLink("could not parse link info") from exc
 
@@ -338,23 +267,25 @@ class PayPayClient:
         except ValueError:
             status = LinkStatus.UNKNOWN
 
-        can_accept = status == LinkStatus.PENDING
         return PaymentInfo(
             link_id=code,
             amount=amount,
             status=status,
-            can_accept=can_accept,
-            payment_id=order_id,
-            sender_name=sender.get("displayName"),
-            sender_external_id=sender.get("externalId"),
-            has_password=has_password,
+            can_accept=status == LinkStatus.PENDING,
+            payment_id=msg_data.get("orderId") or pending.get("orderId"),
+            sender_name=pending.get("senderName") or payload.get("sender", {}).get("displayName"),
+            sender_external_id=payload.get("sender", {}).get("externalId"),
+            has_password=bool(pending.get("isSetPasscode", False)),
+            chat_room_id=message.get("chatRoomId"),
+            message_id=message.get("messageId"),
+            request_id=msg_data.get("requestId"),
             raw=data,
         )
 
     async def link_receive(
         self, url: str, link_info: PaymentInfo | None = None, passcode: str | None = None
     ) -> dict:
-        code = _strip_link(url)
+        code = extract_verification_code(url)
         info = link_info or await self.link_check(code)
 
         if info.status == LinkStatus.SUCCESS:
@@ -364,23 +295,19 @@ class PayPayClient:
         if not info.can_accept:
             raise PayPayInvalidLink("link not acceptable")
 
-        raw = info.raw.get("payload", {})
-        message = raw.get("message", {})
         payload = {
-            "requestId": auth.new_uuid(),
+            "requestId": info.request_id or auth.new_uuid(),
             "orderId": info.payment_id,
             "verificationCode": code,
-            "passcode": passcode if info.has_password else None,
-            "senderMessageId": message.get("messageId"),
-            "senderChannelUrl": message.get("chatRoomId"),
+            "senderMessageId": info.message_id,
+            "senderChannelUrl": info.chat_room_id,
         }
-        data = await self._post(
+        if info.has_password and passcode:
+            payload["passcode"] = passcode
+        return await self._post(
             "/bff/v2/acceptP2PSendMoneyLink",
             json=payload,
-            params={
-                "payPayLang": "ja",
-                "appContext": "P2PMoneyTransferDetailScreen_linkReceiver",
-            },
+            params={"payPayLang": "ja",
+                    "appContext": "P2PMoneyTransferDetailScreen_linkReceiver"},
             headers=self._auth_headers(),
         )
-        return data

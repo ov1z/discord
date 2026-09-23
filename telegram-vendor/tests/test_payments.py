@@ -147,6 +147,20 @@ async def test_delivery_retry_after_send_failure(shop: Shop) -> None:
     assert await _status(shop, oid) == OrderStatus.DELIVERED.value
 
 
+async def test_product_notes_persist_for_delivery(shop: Shop) -> None:
+    pid = await make_product_with_stock(shop, price=500, stock=1)
+    await shop.products.set_notes(pid, "初回起動時にライセンス認証してください")
+    view = next(p for p in await shop.products.list_all() if p.id == pid)
+    assert view.notes == "初回起動時にライセンス認証してください"
+    # A delivered order carries the content; the note is attached at send time
+    # from the product record (see bot/handlers/payment.deliver_to_buyer).
+    oid = await _new_order(shop, 1, pid)
+    result = await shop.payments.process_payment_link(oid, mock_link(500, "NOTE"))
+    assert result.delivered_content is not None
+    product = await shop.products.get(pid)
+    assert product.notes == "初回起動時にライセンス認証してください"
+
+
 async def test_startup_recovery_redelivers_paid(shop: Shop) -> None:
     pid = await make_product_with_stock(shop, price=500, stock=1)
     oid = await _new_order(shop, 1, pid)
