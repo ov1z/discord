@@ -1,15 +1,19 @@
-"""Admin menu and management commands (products / stock / orders)."""
+"""Admin slash commands (products / stock / orders).
+
+The button-driven admin panel lives in admin_panel.py; both share the order
+actions defined here so the behaviour is identical either way.
+"""
 from __future__ import annotations
 
 import logging
 
-from aiogram import Bot, F, Router
+from aiogram import Bot, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import Message
 
 from bot.container import Container
-from bot.handlers.payment import deliver_to_buyer, notify_admin
-from bot.keyboards.admin import admin_menu_keyboard
+from bot.handlers.payment import deliver_to_buyer
+from database.models import Order
 from services.payment_service import PurchaseOutcome
 
 logger = logging.getLogger("bot.admin")
@@ -22,36 +26,49 @@ def _admin_only(message: Message, services: Container) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Menu
+# Shared order actions (used by slash commands AND the button panel)
 # --------------------------------------------------------------------------- #
-@router.message(Command("admin"))
-async def cmd_admin(message: Message, services: Container) -> None:
-    if not _admin_only(message, services):
-        return
-    await message.answer("管理者メニュー", reply_markup=admin_menu_keyboard())
+async def do_retry_delivery(
+    bot: Bot, services: Container, order: Order
+) -> str:
+    result = await services.payments.deliver_order(order.id)
+    if result.outcome == PurchaseOutcome.DELIVERED:
+        return "すでに配布済みです。"
+    if result.outcome == PurchaseOutcome.OUT_OF_STOCK:
+        return "在庫が不足しています。在庫を追加してください。"
+    if result.delivered_content:
+        delivered = await deliver_to_buyer(
+            bot, services, order.id, order.telegram_user_id, result
+        )
+        return "再配布に成功しました。" if delivered else "配布に失敗しました。"
+    return f"再配布できませんでした（状態: {result.outcome.value}）。"
 
 
-@router.callback_query(F.data.startswith("admin:"))
-async def cb_admin(callback: CallbackQuery, services: Container) -> None:
-    if not services.is_admin(callback.from_user.id):
-        await callback.answer("権限がありません。", show_alert=True)
-        return
-    assert callback.data is not None
-    action = callback.data.split(":", 1)[1]
-    hints = {
-        "products": "商品管理: /product_list /product_add 名前|価格|説明 "
-        "/product_edit id|field|value /product_note <id> 注意事項 /product_delete id",
-        "stock": "在庫管理: /restock <product_id> (改行で1行1在庫) "
-        "/stock_add も同じ /stock_count <product_id> /stock_list <product_id>",
-        "orders": "注文管理: /orders /order ORD-XXXX "
-        "/retry_delivery ORD-XXXX /verify_order ORD-XXXX /cancel_order ORD-XXXX",
-        "paypay_status": "/paypay_status を実行してください。",
-        "login": "/login を実行してください（個人チャット限定）。",
-        "logout": "/logout を実行してください。",
-        "logs": "最近の注文は /orders で確認できます。",
-    }
-    await callback.message.answer(hints.get(action, "不明な操作です。"))
-    await callback.answer()
+async def do_verify_order(bot: Bot, services: Container, order: Order) -> str:
+    result = await services.payments.reverify_and_settle(order.id, retry_accept=True)
+    if result.delivered_content:
+        delivered = await deliver_to_buyer(
+            bot, services, order.id, order.telegram_user_id, result
+        )
+        return (
+            "入金を確認し、商品を配布しました。" if delivered
+            else "入金を確認しましたが配布に失敗しました。もう一度再配布してください。"
+        )
+    if result.outcome == PurchaseOutcome.DELIVERED:
+        return "すでに配布済みです。"
+    if result.outcome == PurchaseOutcome.OUT_OF_STOCK:
+        return "入金確認済み・在庫切れです。在庫追加後に再配布してください。"
+    if result.outcome == PurchaseOutcome.PAYMENT_HELD:
+        return "まだ受け取りが確定していません（保留/未受取）。配布していません。"
+    return f"確定できませんでした（状態: {result.outcome.value}）。"
+
+
+async def do_cancel_order(services: Container, order: Order) -> str:
+    ok = await services.orders.cancel(order.order_code)
+    if ok:
+        await services.inventory.release(order.id)
+        return "注文をキャンセルしました。"
+    return "この注文はキャンセルできません。"
 
 
 # --------------------------------------------------------------------------- #
@@ -326,25 +343,11 @@ async def cmd_retry_delivery(
 ) -> None:
     if not _admin_only(message, services):
         return
-    code = (command.args or "").strip()
-    order = await services.orders.get_by_code(code)
+    order = await services.orders.get_by_code((command.args or "").strip())
     if order is None:
         await message.answer("注文が見つかりません。")
         return
-    result = await services.payments.deliver_order(order.id)
-    if result.outcome == PurchaseOutcome.DELIVERED:
-        await message.answer("すでに配布済みです。")
-        return
-    if result.outcome == PurchaseOutcome.OUT_OF_STOCK:
-        await message.answer("在庫が不足しています。在庫を追加してください。")
-        return
-    if result.delivered_content:
-        delivered = await deliver_to_buyer(
-            bot, services, order.id, order.telegram_user_id, result
-        )
-        await message.answer("再配布に成功しました。" if delivered else "配布に失敗しました。")
-    else:
-        await message.answer(f"再配布できませんでした（状態: {result.outcome.value}）。")
+    await message.answer(await do_retry_delivery(bot, services, order))
 
 
 @router.message(Command("verify_order"))
@@ -354,28 +357,11 @@ async def cmd_verify_order(
     """Re-check a PAYMENT_UNKNOWN / held order against PayPay; deliver if received."""
     if not _admin_only(message, services):
         return
-    code = (command.args or "").strip()
-    order = await services.orders.get_by_code(code)
+    order = await services.orders.get_by_code((command.args or "").strip())
     if order is None:
         await message.answer("形式: /verify_order ORD-XXXXXX（注文が見つかりません）")
         return
-    result = await services.payments.reverify_and_settle(order.id, retry_accept=True)
-    if result.delivered_content:
-        delivered = await deliver_to_buyer(
-            bot, services, order.id, order.telegram_user_id, result
-        )
-        await message.answer(
-            "入金を確認し、商品を配布しました。" if delivered
-            else "入金を確認しましたが配布に失敗しました。/retry_delivery してください。"
-        )
-    elif result.outcome == PurchaseOutcome.DELIVERED:
-        await message.answer("すでに配布済みです。")
-    elif result.outcome == PurchaseOutcome.OUT_OF_STOCK:
-        await message.answer("入金確認済み・在庫切れです。在庫追加後 /retry_delivery してください。")
-    elif result.outcome == PurchaseOutcome.PAYMENT_HELD:
-        await message.answer("まだ受け取りが確定していません（保留/未受取）。配布していません。")
-    else:
-        await message.answer(f"確定できませんでした（状態: {result.outcome.value}）。")
+    await message.answer(await do_verify_order(bot, services, order))
 
 
 @router.message(Command("cancel_order"))
@@ -384,10 +370,8 @@ async def cmd_cancel_order(
 ) -> None:
     if not _admin_only(message, services):
         return
-    code = (command.args or "").strip()
-    ok = await services.orders.cancel(code)
-    if ok:
-        await services.inventory.release(
-            (await services.orders.get_by_code(code)).id  # type: ignore[union-attr]
-        )
-    await message.answer("注文をキャンセルしました。" if ok else "キャンセルできません。")
+    order = await services.orders.get_by_code((command.args or "").strip())
+    if order is None:
+        await message.answer("注文が見つかりません。")
+        return
+    await message.answer(await do_cancel_order(services, order))

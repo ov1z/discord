@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
@@ -63,6 +63,11 @@ def _fmt_status(view, ready: bool) -> str:
 async def cmd_login(message: Message, services: Container, state: FSMContext) -> None:
     if not services.is_admin(message.from_user.id):
         return
+    await prompt_login(message, services, state)
+
+
+async def prompt_login(message: Message, services: Container, state: FSMContext) -> None:
+    """Start the login FSM in *message*'s chat. Caller must check admin."""
     if not _is_private(message):
         await message.answer("/login は管理者との個人チャットでのみ実行できます。")
         return

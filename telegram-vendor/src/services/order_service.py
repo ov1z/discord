@@ -113,6 +113,19 @@ class OrderService:
         async with self._sm() as session:
             return list(await OrderRepository(session).list_recent(limit))
 
+    async def list_needs_attention(self) -> list[Order]:
+        """Orders the admin must act on: paid-but-undelivered or unsettled."""
+        async with self._sm() as session:
+            return list(
+                await OrderRepository(session).list_by_status(
+                    [
+                        OrderStatus.PAID.value,
+                        OrderStatus.DELIVERING.value,
+                        OrderStatus.PAYMENT_UNKNOWN.value,
+                    ]
+                )
+            )
+
     def is_expired(self, order: Order) -> bool:
         exp = _aware(order.expires_at)
         if exp is None:

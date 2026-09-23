@@ -1,18 +1,90 @@
-"""Inline keyboard for the admin menu."""
+"""Inline keyboards for the button-driven admin panel.
+
+All callback data is namespaced with the ``ap:`` prefix. Order codes / product
+ids embedded in callback data stay well under Telegram's 64-byte limit.
+"""
 from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from database.models import Order
+from services.product_service import ProductView
+
+
+def _btn(text: str, data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data)
 
 
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="商品管理", callback_data="admin:products")],
-            [InlineKeyboardButton(text="在庫管理", callback_data="admin:stock")],
-            [InlineKeyboardButton(text="注文管理", callback_data="admin:orders")],
-            [InlineKeyboardButton(text="PayPay状態", callback_data="admin:paypay_status")],
-            [InlineKeyboardButton(text="PayPayログイン", callback_data="admin:login")],
-            [InlineKeyboardButton(text="PayPayログアウト", callback_data="admin:logout")],
-            [InlineKeyboardButton(text="ログ確認", callback_data="admin:logs")],
+            [_btn("🛍 商品管理", "ap:products"), _btn("📦 在庫追加", "ap:restock")],
+            [_btn("📋 注文管理", "ap:orders"), _btn("📊 在庫状況", "ap:stock")],
+            [_btn("💴 PayPay状態", "ap:paypay")],
         ]
     )
+
+
+def back_button(target: str = "ap:home") -> list[InlineKeyboardButton]:
+    return [_btn("⬅️ 戻る", target)]
+
+
+def products_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("➕ 商品追加", "ap:add_product")],
+            [_btn("📦 在庫追加", "ap:restock"), _btn("📝 注意事項設定", "ap:note")],
+            [_btn("🗑 商品削除", "ap:del")],
+            back_button(),
+        ]
+    )
+
+
+def _product_rows(products: list[ProductView], action: str) -> list[list[InlineKeyboardButton]]:
+    rows: list[list[InlineKeyboardButton]] = []
+    for p in products:
+        label = f"{p.name} ({p.price}円 / 在庫{p.available_stock})"
+        rows.append([_btn(label, f"ap:{action}:{p.id}")])
+    return rows
+
+
+def product_picker_keyboard(
+    products: list[ProductView], action: str, back: str = "ap:products"
+) -> InlineKeyboardMarkup:
+    rows = _product_rows(products, action)
+    rows.append(back_button(back))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def orders_keyboard(orders: list[Order]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for o in orders:
+        rows.append([_btn(f"{o.order_code} [{o.status}] {o.price}円", f"ap:order:{o.order_code}")])
+    rows.append([_btn("🔄 更新", "ap:orders")])
+    rows.append(back_button())
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def order_actions_keyboard(order_code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("📤 再配布", f"ap:retry:{order_code}"),
+             _btn("🔍 入金再確認", f"ap:verify:{order_code}")],
+            [_btn("❌ キャンセル", f"ap:cancel:{order_code}")],
+            back_button("ap:orders"),
+        ]
+    )
+
+
+def paypay_keyboard(authenticated: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if authenticated:
+        rows.append([_btn("🚪 ログアウト", "ap:logout"), _btn("🔄 更新", "ap:paypay")])
+    else:
+        rows.append([_btn("🔑 PayPayログイン", "ap:login"), _btn("🔄 更新", "ap:paypay")])
+    rows.append(back_button())
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cancel_input_keyboard(target: str = "ap:home") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_btn("キャンセル", target)]])
