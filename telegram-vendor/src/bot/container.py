@@ -13,6 +13,7 @@ from services.order_service import OrderService
 from services.payment_service import PaymentService
 from services.paypay_service import PayPayService
 from services.product_service import ProductService
+from services.user_service import UserService
 
 
 @dataclass
@@ -24,6 +25,7 @@ class Container:
     payments: PaymentService
     paypay: PayPayService
     provider: PaymentProvider
+    users: UserService
 
     def is_admin(self, telegram_user_id: int) -> bool:
         return telegram_user_id == self.settings.admin_telegram_id

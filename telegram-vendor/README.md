@@ -31,7 +31,7 @@ Telegram 上で動作する**デジタル商品の自動販売Bot**です。
 - 実行は **日本国内IP** 必須（国外は CloudFront 403）。`playwright install chromium` が必要。
 
 **既定は `PAYMENT_PROVIDER=mock`** で、ネットワーク/ブラウザなしに全フローが動作します
-（テスト44件パス）。実PayPayは `PAYMENT_PROVIDER=paypay` で有効化。
+（テスト47件パス）。実PayPayは `PAYMENT_PROVIDER=paypay` で有効化。
 
 > ⚠️ 実接続はまだ実口座での通し確認をしていません。最初は少額でテストし、
 > レスポンス差異があれば `src/paypay/client.py` の `_parse_link_info` を調整してください。
@@ -58,7 +58,7 @@ src/
   services/          order / payment / inventory / product / paypay
   database/          engine / models / repository
   security/          crypto(Fernet) / redaction
-tests/               pytest（44件）
+tests/               pytest（47件）
 docs/paypay-api.md   API調査(確度付き)
 tools/               HAR/JSON/ログ解析
 ```
@@ -138,6 +138,7 @@ PYTHONPATH=src python src/main.py
 - 📦 在庫追加 … 商品をボタンで選び、在庫を1行1つ送るだけ
 - 📋 注文管理 … 未配布・保留・状態不明の注文を一覧 → 選ぶと [📤再配布][🔍入金再確認][❌キャンセル]
 - 📊 在庫状況 … 商品ごとの在庫/予約/販売済
+- 📢 一括送信 … 登録ユーザー全員へメッセージを配信（送った文面がそのまま全員へ）
 - 💴 PayPay状態 … [🔑ログイン][🚪ログアウト][🔄更新]
 
 一般ユーザーにはこのパネルは表示されず、`/start` の購入画面のみ見えます。
@@ -181,6 +182,13 @@ GGGG-HHHH-IIII
 /cancel_order ORD-XXXXXX     # キャンセル
 ```
 
+一括送信（登録ユーザー全員へ配信）:
+```
+/broadcast セール開催中です！   # 引数の文面を全員へ
+/broadcast                     # 引数なしなら、次に送った文面を全員へ
+```
+（ブロック済み・退会済みユーザーは自動でスキップし、成功/失敗数を表示します）
+
 ### PayPay `/login`（管理者・個人チャット限定）
 ```
 /login
@@ -222,7 +230,7 @@ https://example.local/pay/<金額>/<任意ID>
 
 自動テスト:
 ```bash
-python -m pytest -q          # 44 tests
+python -m pytest -q          # 47 tests
 ```
 
 ---
@@ -338,7 +346,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 ### 4. 動作確認
 ```bash
-python -m pytest -q                  # 44 tests
+python -m pytest -q                  # 47 tests
 PYTHONPATH=src python src/main.py    # 起動（既定は mock プロバイダ）
 ```
 

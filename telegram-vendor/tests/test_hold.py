@@ -34,6 +34,7 @@ def _container(shop: Shop, seconds: int = 0) -> Container:
         payments=shop.payments,
         paypay=None,  # type: ignore[arg-type]  (unused here)
         provider=shop.provider,
+        users=shop.users,
     )
 
 

@@ -35,6 +35,7 @@ from services.order_service import OrderService
 from services.payment_service import PaymentService
 from services.paypay_service import AuthState, PayPayService
 from services.product_service import ProductService
+from services.user_service import UserService
 
 
 def _configure_logging(level: str) -> None:
@@ -133,6 +134,7 @@ async def main() -> None:
         payments=PaymentService(sm, provider),
         paypay=paypay_service,
         provider=provider,
+        users=UserService(sm),
     )
 
     # Bot / dispatcher

@@ -45,6 +45,18 @@ class UserRepository:
         await self.session.flush()
         return user
 
+    async def all_telegram_ids(self) -> list[int]:
+        """Every registered user's Telegram id (for broadcast)."""
+        rows = await self.session.scalars(
+            select(User.telegram_user_id).order_by(User.id)
+        )
+        return list(rows.all())
+
+    async def count(self) -> int:
+        return int(
+            await self.session.scalar(select(func.count()).select_from(User)) or 0
+        )
+
 
 class ProductRepository:
     def __init__(self, session: AsyncSession) -> None:

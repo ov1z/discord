@@ -20,7 +20,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [_btn("🛍 商品管理", "ap:products"), _btn("📦 在庫追加", "ap:restock")],
             [_btn("📋 注文管理", "ap:orders"), _btn("📊 在庫状況", "ap:stock")],
-            [_btn("💴 PayPay状態", "ap:paypay")],
+            [_btn("📢 一括送信", "ap:broadcast"), _btn("💴 PayPay状態", "ap:paypay")],
         ]
     )
 

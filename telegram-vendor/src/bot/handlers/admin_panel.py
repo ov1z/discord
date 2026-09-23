@@ -386,6 +386,25 @@ async def cb_order_cancel(callback: CallbackQuery, services: Container) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Broadcast
+# --------------------------------------------------------------------------- #
+@router.callback_query(F.data == "ap:broadcast")
+async def cb_broadcast(callback: CallbackQuery, services: Container, state: FSMContext) -> None:
+    if not _is_admin_cb(callback, services):
+        await callback.answer("権限がありません。", show_alert=True)
+        return
+    count = await services.users.count()
+    await state.set_state(AdminStates.BROADCAST)
+    await _show(
+        callback,
+        f"📢 登録ユーザー {count} 人へ送るメッセージを送信してください。\n"
+        "送信した内容がそのまま全員に配信されます。",
+        kb.cancel_input_keyboard("ap:home"),
+    )
+    await callback.answer()
+
+
+# --------------------------------------------------------------------------- #
 # PayPay
 # --------------------------------------------------------------------------- #
 @router.callback_query(F.data == "ap:paypay")

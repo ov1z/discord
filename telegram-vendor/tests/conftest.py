@@ -20,6 +20,7 @@ from services.inventory_service import InventoryService  # noqa: E402
 from services.order_service import OrderService  # noqa: E402
 from services.payment_service import PaymentService  # noqa: E402
 from services.product_service import ProductService  # noqa: E402
+from services.user_service import UserService  # noqa: E402
 
 
 @dataclass
@@ -30,6 +31,7 @@ class Shop:
     orders: OrderService
     payments: PaymentService
     provider: MockPaymentProvider
+    users: UserService
 
 
 @pytest_asyncio.fixture
@@ -50,6 +52,7 @@ async def shop(tmp_path) -> Shop:
         orders=OrderService(sm, ttl_seconds=600),
         payments=PaymentService(sm, provider),
         provider=provider,
+        users=UserService(sm),
     )
     yield shop
     await engine.dispose()
