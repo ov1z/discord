@@ -30,7 +30,7 @@ from database.repository import (
     PaymentRepository,
 )
 from payments.base import AcceptOutcome, PaymentProvider
-from paypay.exceptions import PayPayError, PaymentAmountMismatch
+from paypay.exceptions import PayPayError, PayPayTemporaryHold, PaymentAmountMismatch
 from paypay.models import LinkStatus, PaymentInfo
 from security.redaction import redact
 
@@ -49,6 +49,7 @@ class PurchaseOutcome(str, enum.Enum):
     OUT_OF_STOCK = "OUT_OF_STOCK"
     PROVIDER_NOT_READY = "PROVIDER_NOT_READY"
     PAYMENT_UNKNOWN = "PAYMENT_UNKNOWN"
+    PAYMENT_HELD = "PAYMENT_HELD"  # PayPay temporary hold; money not settled
     FAILED = "FAILED"
 
 
@@ -165,6 +166,12 @@ class PaymentService:
             return PurchaseResult(
                 PurchaseOutcome.AMOUNT_MISMATCH, order_code, expected, info.amount
             )
+        except PayPayTemporaryHold:
+            # Money not finally settled -> never deliver; leave for manual check.
+            await self._mark_unknown(order_id, info)
+            return PurchaseResult(
+                PurchaseOutcome.PAYMENT_HELD, order_code, expected
+            )
         except PayPayError:
             # Truly unknown whether it went through -> UNKNOWN, not FAILED.
             await self._mark_unknown(order_id, info)
@@ -172,6 +179,11 @@ class PaymentService:
                 PurchaseOutcome.PAYMENT_UNKNOWN, order_code, expected
             )
 
+        if result.outcome == AcceptOutcome.HELD:
+            await self._mark_unknown(order_id, info, result.raw)
+            return PurchaseResult(
+                PurchaseOutcome.PAYMENT_HELD, order_code, expected
+            )
         if result.outcome == AcceptOutcome.UNKNOWN:
             await self._mark_unknown(order_id, info, result.raw)
             return PurchaseResult(
@@ -209,6 +221,86 @@ class PaymentService:
 
         # ---- deliver ----
         return await self._deliver(order_id, order_code, expected, payment_id)
+
+    # ------------------------------------------------------- re-verify (admin)
+    async def reverify_and_settle(
+        self, order_id: int, retry_accept: bool = False
+    ) -> PurchaseResult:
+        """Re-check a PAYMENT_UNKNOWN / held order against PayPay and settle it.
+
+        If PayPay now reports the link as received (SUCCESS), mark PAID and
+        proceed to delivery. Otherwise leave it unknown/held (never deliver).
+
+        retry_accept: after a temporary hold is released, the link may still be
+        PENDING (the earlier accept did not go through). When True and the link
+        is still acceptable, accept is attempted once more. This cannot
+        double-receive: a received link reports SUCCESS and is never re-accepted.
+
+        Uses the link stored on the order; safe to call repeatedly.
+        """
+        lock = self._locks[order_id]
+        async with lock:
+            async with self._sm() as session:
+                order = await OrderRepository(session).get(order_id)
+                if order is None:
+                    raise ValueError("order not found")
+                order_code = order.order_code
+                expected = order.price
+                status = order.status
+                url = order.paypay_link
+
+            if status == OrderStatus.DELIVERED.value:
+                return PurchaseResult(PurchaseOutcome.DELIVERED, order_code, expected)
+            if status in (OrderStatus.PAID.value, OrderStatus.DELIVERING.value):
+                return await self._deliver(order_id, order_code, expected, None)
+            if status != OrderStatus.PAYMENT_UNKNOWN.value:
+                return PurchaseResult(
+                    PurchaseOutcome.ORDER_NOT_WAITING, order_code, expected
+                )
+            if not url:
+                return PurchaseResult(
+                    PurchaseOutcome.PAYMENT_UNKNOWN, order_code, expected
+                )
+
+            try:
+                info = await self._provider.get_payment_status(url)
+            except PayPayError:
+                return PurchaseResult(
+                    PurchaseOutcome.PAYMENT_UNKNOWN, order_code, expected
+                )
+
+            if (
+                retry_accept
+                and info.status == LinkStatus.PENDING
+                and info.can_accept
+                and info.amount == expected
+            ):
+                try:
+                    result = await self._provider.accept_payment(url, link_info=info)
+                    ok = result.outcome in (AcceptOutcome.ACCEPTED, AcceptOutcome.ALREADY)
+                except PayPayError:
+                    ok = False
+                if ok:
+                    confirmed = await self._confirm_received(url)
+                    if confirmed:
+                        info = await self._provider.get_payment_status(url)
+
+            if info.status != LinkStatus.SUCCESS:
+                # Still pending/held -> not settled yet.
+                return PurchaseResult(
+                    PurchaseOutcome.PAYMENT_HELD, order_code, expected
+                )
+
+            payment_id = info.payment_id
+            await self._set_status(
+                order_id, OrderStatus.PAID,
+                paid_at=datetime.now(timezone.utc),
+                external_payment_id=payment_id,
+            )
+            await self._update_payment(
+                order_id, PaymentStatus.COMPLETED, info, info.raw, external_id=payment_id
+            )
+            return await self._deliver(order_id, order_code, expected, payment_id)
 
     # --------------------------------------------------------------- delivery
     async def deliver_order(self, order_id: int) -> PurchaseResult:

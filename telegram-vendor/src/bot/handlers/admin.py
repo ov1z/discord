@@ -44,7 +44,7 @@ async def cb_admin(callback: CallbackQuery, services: Container) -> None:
         "stock": "在庫管理: /restock <product_id> (改行で1行1在庫) "
         "/stock_add も同じ /stock_count <product_id> /stock_list <product_id>",
         "orders": "注文管理: /orders /order ORD-XXXX "
-        "/retry_delivery ORD-XXXX /cancel_order ORD-XXXX",
+        "/retry_delivery ORD-XXXX /verify_order ORD-XXXX /cancel_order ORD-XXXX",
         "paypay_status": "/paypay_status を実行してください。",
         "login": "/login を実行してください（個人チャット限定）。",
         "logout": "/logout を実行してください。",
@@ -345,6 +345,37 @@ async def cmd_retry_delivery(
         await message.answer("再配布に成功しました。" if delivered else "配布に失敗しました。")
     else:
         await message.answer(f"再配布できませんでした（状態: {result.outcome.value}）。")
+
+
+@router.message(Command("verify_order"))
+async def cmd_verify_order(
+    message: Message, services: Container, command: CommandObject, bot: Bot
+) -> None:
+    """Re-check a PAYMENT_UNKNOWN / held order against PayPay; deliver if received."""
+    if not _admin_only(message, services):
+        return
+    code = (command.args or "").strip()
+    order = await services.orders.get_by_code(code)
+    if order is None:
+        await message.answer("形式: /verify_order ORD-XXXXXX（注文が見つかりません）")
+        return
+    result = await services.payments.reverify_and_settle(order.id, retry_accept=True)
+    if result.delivered_content:
+        delivered = await deliver_to_buyer(
+            bot, services, order.id, order.telegram_user_id, result
+        )
+        await message.answer(
+            "入金を確認し、商品を配布しました。" if delivered
+            else "入金を確認しましたが配布に失敗しました。/retry_delivery してください。"
+        )
+    elif result.outcome == PurchaseOutcome.DELIVERED:
+        await message.answer("すでに配布済みです。")
+    elif result.outcome == PurchaseOutcome.OUT_OF_STOCK:
+        await message.answer("入金確認済み・在庫切れです。在庫追加後 /retry_delivery してください。")
+    elif result.outcome == PurchaseOutcome.PAYMENT_HELD:
+        await message.answer("まだ受け取りが確定していません（保留/未受取）。配布していません。")
+    else:
+        await message.answer(f"確定できませんでした（状態: {result.outcome.value}）。")
 
 
 @router.message(Command("cancel_order"))

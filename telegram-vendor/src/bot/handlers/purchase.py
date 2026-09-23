@@ -8,7 +8,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.container import Container
-from bot.handlers.payment import buyer_message_for, deliver_to_buyer, notify_admin
+from bot.handlers.payment import (
+    buyer_message_for,
+    deliver_to_buyer,
+    hold_message,
+    notify_admin,
+    schedule_hold_recheck,
+)
 from bot.states.purchase import PurchaseStates
 from services.payment_service import PurchaseOutcome
 
@@ -78,6 +84,17 @@ async def on_paypay_link(
             f"⚠️ 決済状態不明（PAYMENT_UNKNOWN）: 注文 {result.order_code}。"
             " 手動確認してください。",
         )
+    elif result.outcome == PurchaseOutcome.PAYMENT_HELD:
+        seconds = services.settings.hold_recheck_seconds
+        await message.answer(hold_message(seconds))
+        await notify_admin(
+            bot,
+            services,
+            f"ℹ️ PayPay一次保留: 注文 {result.order_code}。"
+            f"購入者に解除を依頼、{seconds}秒後に自動で再確認します。",
+        )
+        schedule_hold_recheck(bot, services, order_id, message.chat.id)
+        await state.clear()
     elif result.outcome == PurchaseOutcome.OUT_OF_STOCK:
         await notify_admin(
             bot,

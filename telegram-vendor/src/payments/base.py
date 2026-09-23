@@ -17,6 +17,7 @@ class AcceptOutcome(str, enum.Enum):
     ALREADY = "ALREADY"        # was already received (idempotent success)
     FAILED = "FAILED"          # definitively failed, nothing received
     UNKNOWN = "UNKNOWN"        # transport error; real state undetermined
+    HELD = "HELD"              # temporary hold; money NOT finally settled
 
 
 @dataclass(slots=True)

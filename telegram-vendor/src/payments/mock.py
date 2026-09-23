@@ -15,6 +15,7 @@ from paypay.exceptions import (
     PayPayAlreadyAccepted,
     PayPayInvalidLink,
     PayPayNetworkError,
+    PayPayTemporaryHold,
 )
 from paypay.models import LinkStatus, PaymentInfo
 
@@ -31,6 +32,7 @@ class MockPaymentProvider(PaymentProvider):
         self.fail_inspect: set[str] = set()
         self.timeout_on_accept: set[str] = set()
         self.timeout_after_accept: set[str] = set()  # accept happens, status errors
+        self.hold_on_accept: set[str] = set()  # PayPay temporary hold (42007013)
         self.ready: bool = True
 
     def _parse(self, url: str) -> tuple[int, str]:
@@ -67,6 +69,10 @@ class MockPaymentProvider(PaymentProvider):
         if link_id in self.timeout_on_accept:
             # We do not know whether PayPay processed it -> UNKNOWN.
             raise PayPayNetworkError("timeout during accept (test hook)")
+
+        if link_id in self.hold_on_accept:
+            # Temporary hold: money not finally settled -> must not deliver.
+            raise PayPayTemporaryHold("temporary hold (test hook)")
 
         if link_id in self._received:
             raise PayPayAlreadyAccepted("already received")

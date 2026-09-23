@@ -31,7 +31,7 @@ Telegram 上で動作する**デジタル商品の自動販売Bot**です。
 - 実行は **日本国内IP** 必須（国外は CloudFront 403）。`playwright install chromium` が必要。
 
 **既定は `PAYMENT_PROVIDER=mock`** で、ネットワーク/ブラウザなしに全フローが動作します
-（テスト37件パス）。実PayPayは `PAYMENT_PROVIDER=paypay` で有効化。
+（テスト44件パス）。実PayPayは `PAYMENT_PROVIDER=paypay` で有効化。
 
 > ⚠️ 実接続はまだ実口座での通し確認をしていません。最初は少額でテストし、
 > レスポンス差異があれば `src/paypay/client.py` の `_parse_link_info` を調整してください。
@@ -58,7 +58,7 @@ src/
   services/          order / payment / inventory / product / paypay
   database/          engine / models / repository
   security/          crypto(Fernet) / redaction
-tests/               pytest（36件）
+tests/               pytest（44件）
 docs/paypay-api.md   API調査(確度付き)
 tools/               HAR/JSON/ログ解析
 ```
@@ -105,6 +105,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 | `PAYPAY_SESSION_PATH` | 暗号化セッションの保存先 |
 | `PAYMENT_PROVIDER` | `mock`（既定）/ `paypay` |
 | `ORDER_TTL_SECONDS` | 注文有効時間（既定600=10分） |
+| `HOLD_RECHECK_SECONDS` | PayPay一次保留時、解除を待って自動再確認するまでの秒数（既定60） |
 
 ### 4. DB 初期化
 
@@ -165,6 +166,7 @@ GGGG-HHHH-IIII
 /orders                      # 直近の注文
 /order ORD-XXXXXX            # 詳細
 /retry_delivery ORD-XXXXXX   # 配布再試行（送信失敗/在庫追加後）
+/verify_order ORD-XXXXXX     # 保留・状態不明の注文をPayPayで再確認し、受取済みなら配布
 /cancel_order ORD-XXXXXX     # キャンセル
 ```
 
@@ -209,7 +211,7 @@ https://example.local/pay/<金額>/<任意ID>
 
 自動テスト:
 ```bash
-python -m pytest -q          # 36 tests
+python -m pytest -q          # 44 tests
 ```
 
 ---
@@ -265,6 +267,26 @@ password → OTL 2FA → token交換。ブラウザはWAF通行証取得の一�
 > `PayPayClient(transport=...)` に渡せばネットワークなしで書けます。
 > 残タスク/注意は **`TODO_PAYPAY.md`** 参照。
 
+### PayPay 一次保留（受け取り保留）の扱い
+
+受取時に PayPay 側で送金が一時保留になった場合（`backendResultCode 42007013` 等）:
+
+1. **商品は渡さない**（入金が確定していないため）。注文は `PAYMENT_UNKNOWN` で保持
+2. 購入者に「PayPayアプリで保留を解除し、**1分以内**に完了してください」と通知
+3. 管理者にも保留発生を通知
+4. **1分後（`HOLD_RECHECK_SECONDS`）に自動で再確認**
+   - 受取済み（`orderStatus == SUCCESS`）→ そのまま**商品を配布**
+   - リンクがまだ受取可能（`PENDING`）→ 受取を1回だけ再実行 → 確定を確認できたら配布
+   - 解除されていない → 購入者に「確認できませんでした」と通知、管理者に
+     `/verify_order ORD-XXXX` を案内（配布はしない）
+5. 再確認は何度呼んでも**二重受取・二重配布にならない**（受取済みリンクは再受取しない）
+6. 1分待ちの間に Bot が再起動した場合は、**起動時に未確定注文を再確認**し、受取済みなら配布
+
+> ⚠️ 一次保留の「誰がどう解除するか」「解除後に受取を再実行する必要があるか」は、
+> 実口座でまだ確認できていません。どちらのケースでも動くように、再確認時は
+> 「受取済みなら配布／まだ受取可能なら1回だけ再受取」の両対応にしてあります。
+> 実際の挙動を確認したら `docs/paypay-api.md` を更新してください。
+
 ### 安全設計（実API接続時に効く保護）
 - リンク金額は**完全一致**のみ受取（過不足はどちらも拒否）
 - 受取APIの成功だけで商品を渡さず、`get_payment_status` で**最終状態を再確認**
@@ -305,7 +327,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 ### 4. 動作確認
 ```bash
-python -m pytest -q                  # 36 tests
+python -m pytest -q                  # 44 tests
 PYTHONPATH=src python src/main.py    # 起動（既定は mock プロバイダ）
 ```
 

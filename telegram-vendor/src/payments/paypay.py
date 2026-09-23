@@ -14,6 +14,7 @@ from paypay.exceptions import (
     PayPayAlreadyAccepted,
     PayPayError,
     PayPayNetworkError,
+    PayPayTemporaryHold,
 )
 from paypay.models import LinkStatus, PaymentInfo
 
@@ -39,6 +40,9 @@ class PayPayPaymentProvider(PaymentProvider):
             raw = await self._client.link_receive(url, link_info=link_info)
         except PayPayAlreadyAccepted:
             return AcceptResult(outcome=AcceptOutcome.ALREADY)
+        except PayPayTemporaryHold:
+            # Money not finally settled (hold/KYC/limit). Do NOT deliver.
+            return AcceptResult(outcome=AcceptOutcome.HELD)
         except PayPayNetworkError:
             # State genuinely undetermined; caller must re-check, not fail.
             return AcceptResult(outcome=AcceptOutcome.UNKNOWN)

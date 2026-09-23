@@ -38,6 +38,8 @@ class Settings(BaseSettings):
 
     # Behaviour
     order_ttl_seconds: int = Field(default=600, alias="ORDER_TTL_SECONDS")
+    # 一次保留が出たとき、購入者に解除を促してから再確認するまでの秒数
+    hold_recheck_seconds: int = Field(default=60, alias="HOLD_RECHECK_SECONDS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     @property

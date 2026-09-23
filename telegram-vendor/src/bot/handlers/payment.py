@@ -6,6 +6,7 @@ so it can be retried (see /retry_delivery and startup recovery).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -92,6 +93,86 @@ async def _notify_admin_purchase(
     await _safe_admin_send(bot, container, text)
 
 
+# Strong refs so scheduled rechecks are not garbage-collected mid-wait.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def schedule_hold_recheck(
+    bot: Bot, container: Container, order_id: int, buyer_chat_id: int
+) -> None:
+    """After a PayPay temporary hold, wait HOLD_RECHECK_SECONDS, then re-check.
+
+    If the buyer released the hold and the money is received, the goods are
+    delivered. Otherwise the buyer is told and the admin is alerted (the order
+    stays PAYMENT_UNKNOWN; /verify_order can settle it later).
+    """
+    task = asyncio.create_task(
+        _hold_recheck(bot, container, order_id, buyer_chat_id)
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def _hold_recheck(
+    bot: Bot, container: Container, order_id: int, buyer_chat_id: int
+) -> None:
+    await asyncio.sleep(container.settings.hold_recheck_seconds)
+    try:
+        result = await container.payments.reverify_and_settle(
+            order_id, retry_accept=True
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("hold recheck failed for order %s", order_id)
+        await notify_admin(
+            bot, container, f"⚠️ 保留後の再確認でエラー: 注文ID(内部) {order_id}"
+        )
+        return
+
+    if result.delivered_content:
+        delivered = await deliver_to_buyer(
+            bot, container, order_id, buyer_chat_id, result
+        )
+        if not delivered:
+            await notify_admin(
+                bot, container, f"⚠️ 保留解除後の配布に失敗（要再配布）: 注文 {result.order_code}"
+            )
+        return
+
+    if result.outcome == PurchaseOutcome.DELIVERED:
+        return  # already handled elsewhere
+
+    if result.outcome == PurchaseOutcome.OUT_OF_STOCK:
+        text = buyer_message_for(result)
+        if text:
+            await _safe_send(bot, buyer_chat_id, text)
+        await notify_admin(
+            bot, container,
+            f"⚠️ 保留解除後に入金確認、在庫切れ: 注文 {result.order_code}。在庫追加後 /retry_delivery",
+        )
+        return
+
+    # Still held / unknown after the wait.
+    await _safe_send(
+        bot,
+        buyer_chat_id,
+        "保留の解除が確認できませんでした。\n"
+        "入金が確定していないため、商品はまだお渡しできません。\n"
+        f"管理者が確認します（注文ID: {result.order_code}）。",
+    )
+    await notify_admin(
+        bot, container,
+        f"⚠️ 保留が{container.settings.hold_recheck_seconds}秒以内に解除されず未配布: "
+        f"注文 {result.order_code}。確認後 /verify_order {result.order_code}",
+    )
+
+
+async def _safe_send(bot: Bot, chat_id: int, text: str) -> None:
+    try:
+        await bot.send_message(chat_id, text)
+    except Exception:  # noqa: BLE001
+        logger.warning("failed to send message to buyer")
+
+
 async def notify_admin(bot: Bot, container: Container, text: str) -> None:
     await _safe_admin_send(bot, container, text)
 
@@ -104,6 +185,17 @@ async def _safe_admin_send(bot: Bot, container: Container, text: str) -> None:
         await bot.send_message(admin_id, text)
     except Exception:  # noqa: BLE001
         logger.warning("failed to notify admin")
+
+
+def hold_message(seconds: int) -> str:
+    wait = f"{seconds // 60}分" if seconds % 60 == 0 else f"{seconds}秒"
+    return (
+        "⚠️ PayPay側で送金が一時保留になりました。\n"
+        "入金が確定していないため、まだ商品はお渡しできません。\n\n"
+        f"PayPayアプリで保留を解除（送金を承認）し、{wait}以内に完了してください。\n"
+        f"{wait}後に自動で受け取りを再確認し、確認できればすぐ商品をお送りします。\n\n"
+        "新しいリンクの作成や二重送金はしないでください。"
+    )
 
 
 def buyer_message_for(result: PurchaseResult) -> str | None:
@@ -129,6 +221,9 @@ def buyer_message_for(result: PurchaseResult) -> str | None:
             "決済状態を確認中です。二重送金はしないでください。\n"
             "確認が取れ次第、商品をお送りします。"
         )
+    if o == PurchaseOutcome.PAYMENT_HELD:
+        # Caller appends the recheck deadline (see hold_message()).
+        return None
     if o == PurchaseOutcome.OUT_OF_STOCK:
         return (
             "お支払いを確認しましたが、在庫確保に問題が発生しました。\n"

@@ -78,6 +78,27 @@ async def _recover_undelivered(bot: Bot, container: Container) -> None:
         except Exception:  # noqa: BLE001
             logging.getLogger("main").exception("recovery failed for %s", code)
 
+    # PAYMENT_UNKNOWN (timeout / hold whose 1-minute recheck was lost on restart):
+    # settle only if PayPay already reports the link as received.
+    async with sm() as session:
+        unknown = await OrderRepository(session).list_by_status(
+            [OrderStatus.PAYMENT_UNKNOWN.value]
+        )
+        unknown_list = [(o.id, o.telegram_user_id, o.order_code) for o in unknown]
+    for order_id, buyer_id, code in unknown_list:
+        try:
+            result = await container.payments.reverify_and_settle(order_id)
+            if result.delivered_content:
+                await deliver_to_buyer(bot, container, order_id, buyer_id, result)
+            else:
+                await notify_admin(
+                    bot, container,
+                    f"⚠️ 未確定の注文あり: {code}（{result.outcome.value}）。"
+                    f"確認後 /verify_order {code}",
+                )
+        except Exception:  # noqa: BLE001
+            logging.getLogger("main").exception("reverify failed for %s", code)
+
 
 async def main() -> None:
     settings = get_settings()

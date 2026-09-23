@@ -120,3 +120,13 @@
 
 > 実HAR/JSONを取得したら `tools/analyze_har.py` / `analyze_json.py` で
 > 構造を確認し、この表を CONFIRMED に更新してください。
+
+## 一次保留（受け取り保留） — 実装済み / 挙動は要実測
+
+- **検知**: 受取(`acceptP2PSendMoneyLink`)のエラーで `error.backendResultCode == "42007013"`
+  → `PayPayTemporaryHold`（旧 PayPaython-mobile の `P2PTemporaryHoldError` と同じコード）
+- **Botの対応**: 配布しない → 購入者に解除を依頼 → `HOLD_RECHECK_SECONDS`(既定60秒)後に
+  `getP2PLinkInfo` で再確認。`SUCCESS` なら配布、`PENDING` なら受取を1回だけ再実行して確認
+- **未確認点**: 保留を解除するのは誰か（送信者/受取者）、解除後に受取の再実行が必要か、
+  保留中の `orderStatus` の値。実口座で確認後に CONFIRMED へ
+- **STATUS**: **LIKELY**

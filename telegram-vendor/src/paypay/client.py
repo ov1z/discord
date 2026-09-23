@@ -29,6 +29,7 @@ from paypay.exceptions import (
     PayPayNetworkError,
     PayPayOTPRequired,
     PayPaySessionExpired,
+    PayPayTemporaryHold,
 )
 from paypay.models import (
     LinkStatus,
@@ -105,6 +106,10 @@ class PayPayClient:
             return
         if code == "S0001":
             raise PayPaySessionExpired("access token revoked/expired")
+        # Temporary hold / P2P receiving limited (money not finally settled).
+        backend = (data.get("error", {}) or {}).get("backendResultCode")
+        if backend == "42007013":
+            raise PayPayTemporaryHold("P2P receipt temporarily held")
         raise PayPayError(f"paypay result code {code}")
 
     async def _get(self, path: str, *, params: dict, headers: dict) -> dict:

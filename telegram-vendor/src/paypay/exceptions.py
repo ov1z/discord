@@ -30,6 +30,15 @@ class PayPayAlreadyAccepted(PayPayError):
     """The link was already received (by us or someone else)."""
 
 
+class PayPayTemporaryHold(PayPayError):
+    """Receipt is on a temporary hold / P2P receiving is temporarily limited.
+
+    Corresponds to PayPay backendResultCode 42007013 and to the case where the
+    money is not immediately/finally settled (e.g. KYC not completed, risk
+    hold). The goods must NOT be delivered until the receipt is confirmed.
+    """
+
+
 class PayPayNetworkError(PayPayError):
     """Transport-level failure where the final state is UNKNOWN."""
 
