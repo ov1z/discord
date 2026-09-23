@@ -34,7 +34,7 @@ def products_menu_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [_btn("➕ 商品追加", "ap:add_product")],
             [_btn("📦 在庫追加", "ap:restock"), _btn("📝 注意事項設定", "ap:note")],
-            [_btn("🗑 商品削除", "ap:del")],
+            [_btn("💹 価格設定", "ap:tiers"), _btn("🗑 商品削除", "ap:del")],
             back_button(),
         ]
     )

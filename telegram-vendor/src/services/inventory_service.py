@@ -42,6 +42,17 @@ class InventoryService:
             await session.commit()
             return item
 
+    async def reserve_many_for_order(
+        self, product_id: int, order_id: int, quantity: int
+    ) -> list[Inventory] | None:
+        """Atomically reserve *quantity* items; None if not enough stock."""
+        async with self._sm() as session:
+            items = await InventoryRepository(session).reserve_many(
+                product_id, order_id, quantity
+            )
+            await session.commit()
+            return items
+
     async def mark_delivered(self, inventory_id: int) -> None:
         async with self._sm() as session:
             await InventoryRepository(session).mark_sold(

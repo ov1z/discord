@@ -202,10 +202,80 @@ class InventoryRepository:
             return None
         return await self.session.get(Inventory, candidate_id)
 
+    async def reserve_many(
+        self, product_id: int, order_id: int, quantity: int
+    ) -> list[Inventory] | None:
+        """Atomically reserve *quantity* items for the order.
+
+        Idempotent: items already reserved/sold for this order count toward the
+        quantity. Returns the order's reserved items (len == quantity), or None
+        if there is not enough stock (in which case NOTHING new is reserved).
+        """
+        existing = list(
+            await self.session.scalars(
+                select(Inventory).where(
+                    Inventory.reserved_order_id == order_id,
+                    Inventory.status.in_(
+                        [InventoryStatus.RESERVED.value, InventoryStatus.SOLD.value]
+                    ),
+                ).order_by(Inventory.id)
+            )
+        )
+        need = quantity - len(existing)
+        if need <= 0:
+            return existing[:quantity]
+
+        candidate_ids = list(
+            await self.session.scalars(
+                select(Inventory.id)
+                .where(
+                    Inventory.product_id == product_id,
+                    Inventory.status == InventoryStatus.AVAILABLE.value,
+                )
+                .order_by(Inventory.id)
+                .limit(need)
+            )
+        )
+        if len(candidate_ids) < need:
+            return None  # insufficient stock; reserve nothing (no partial)
+
+        result = await self.session.execute(
+            update(Inventory)
+            .where(
+                Inventory.id.in_(candidate_ids),
+                Inventory.status == InventoryStatus.AVAILABLE.value,
+            )
+            .values(
+                status=InventoryStatus.RESERVED.value, reserved_order_id=order_id
+            )
+        )
+        await self.session.flush()
+        if result.rowcount != need:
+            # Lost a race on some rows; roll back this unit of work.
+            await self.session.rollback()
+            return None
+        return await self.list_reserved_for_order(order_id)
+
+    async def list_reserved_for_order(self, order_id: int) -> list[Inventory]:
+        return list(
+            await self.session.scalars(
+                select(Inventory).where(
+                    Inventory.reserved_order_id == order_id
+                ).order_by(Inventory.id)
+            )
+        )
+
     async def get_reserved_for_order(self, order_id: int) -> Inventory | None:
         return await self.session.scalar(
             select(Inventory).where(Inventory.reserved_order_id == order_id)
         )
+
+    async def mark_many_sold(self, order_id: int, delivered_at: datetime) -> None:
+        for item in await self.list_reserved_for_order(order_id):
+            if item.status != InventoryStatus.SOLD.value:
+                item.status = InventoryStatus.SOLD.value
+                item.delivered_at = delivered_at
+        await self.session.flush()
 
     async def mark_sold(self, inventory_id: int, delivered_at: datetime) -> None:
         item = await self.session.get(Inventory, inventory_id)
@@ -215,17 +285,17 @@ class InventoryRepository:
             await self.session.flush()
 
     async def release(self, order_id: int) -> None:
-        """Return a reserved-but-not-sold item to the pool (on cancel)."""
-        item = await self.session.scalar(
+        """Return all reserved-but-not-sold items to the pool (on cancel)."""
+        items = await self.session.scalars(
             select(Inventory).where(
                 Inventory.reserved_order_id == order_id,
                 Inventory.status == InventoryStatus.RESERVED.value,
             )
         )
-        if item is not None:
+        for item in items:
             item.status = InventoryStatus.AVAILABLE.value
             item.reserved_order_id = None
-            await self.session.flush()
+        await self.session.flush()
 
 
 class OrderRepository:
@@ -239,11 +309,15 @@ class OrderRepository:
         product_id: int,
         price: int,
         expires_at: datetime,
+        quantity: int = 1,
+        unit_price: int = 0,
     ) -> Order:
         order = Order(
             order_code=order_code,
             telegram_user_id=telegram_user_id,
             product_id=product_id,
+            quantity=quantity,
+            unit_price=unit_price,
             price=price,
             status=OrderStatus.WAITING_PAYMENT.value,
             expires_at=expires_at,

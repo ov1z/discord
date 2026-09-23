@@ -93,9 +93,20 @@ async def test_expired_order(shop: Shop) -> None:
     assert await _status(shop, oid) == OrderStatus.EXPIRED.value
 
 
-async def test_out_of_stock_keeps_money(shop: Shop) -> None:
+async def test_cannot_order_when_out_of_stock(shop: Shop) -> None:
     pid = await make_product_with_stock(shop, price=500, stock=0)
+    res = await shop.orders.create_order(1, pid)
+    assert res is not None and res.out_of_stock is True
+    assert res.order_id == 0  # no order is created
+
+
+async def test_out_of_stock_after_paid_keeps_money(shop: Shop) -> None:
+    # Order placed while stock existed, but stock is gone by delivery time.
+    pid = await make_product_with_stock(shop, price=500, stock=1)
     oid = await _new_order(shop, 1, pid)
+    # A different order grabs the only item first.
+    other = await _new_order(shop, 2, pid)
+    assert await shop.inventory.reserve_for_order(pid, other) is not None
     result = await shop.payments.process_payment_link(oid, mock_link(500, "NS"))
     assert result.outcome == PurchaseOutcome.OUT_OF_STOCK
     # Money confirmed: order left in DELIVERING for later re-delivery.

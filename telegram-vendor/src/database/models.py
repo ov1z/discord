@@ -89,6 +89,8 @@ class Product(Base):
     # Per-product note shown to the buyer AFTER the item is delivered
     # (e.g. usage instructions / warnings).
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON list of bulk-discount tiers [{"min":1,"price":1800},...]; NULL = flat.
+    price_tiers: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -131,6 +133,9 @@ class Order(Base):
     product_id: Mapped[int] = mapped_column(
         ForeignKey("products.id"), index=True, nullable=False
     )
+    quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    unit_price: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # price = quantity * unit_price (the exact total the buyer must pay).
     price: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(
         String(24), default=OrderStatus.WAITING_PAYMENT.value, index=True, nullable=False

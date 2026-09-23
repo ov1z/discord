@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from bot.container import Container
-from bot.keyboards.products import product_list_keyboard
+from bot.keyboards.products import shop_list_keyboard
 from database.engine import get_sessionmaker
 from database.repository import UserRepository
 
@@ -18,10 +18,12 @@ async def _show_products(target: Message, services: Container) -> None:
     if not products:
         await target.answer("現在販売中の商品はありません。")
         return
-    lines = ["🛒 商品一覧\n"]
-    for p in products:
-        lines.append(f"・{p.name} - {p.price}円 (在庫: {p.available_stock})")
-    await target.answer("\n".join(lines), reply_markup=product_list_keyboard(products))
+    text = (
+        "🛒 商品一覧\n\n"
+        "商品を押すと、価格・在庫・まとめ買い割引を確認して購入できます。\n\n"
+        "現在の価格・在庫:"
+    )
+    await target.answer(text, reply_markup=shop_list_keyboard(products))
 
 
 @router.message(Command("start"))

@@ -62,13 +62,28 @@ def _ensure_new_columns(sync_conn) -> None:
     from sqlalchemy import inspect, text
 
     inspector = inspect(sync_conn)
-    # products.notes
-    try:
-        cols = {c["name"] for c in inspector.get_columns("products")}
-    except Exception:  # table missing -> create_all handled it
-        cols = set()
-    if cols and "notes" not in cols:
+
+    def cols(table: str) -> set[str]:
+        try:
+            return {c["name"] for c in inspector.get_columns(table)}
+        except Exception:  # table missing -> create_all handled it
+            return set()
+
+    pcols = cols("products")
+    if pcols and "notes" not in pcols:
         sync_conn.execute(text("ALTER TABLE products ADD COLUMN notes TEXT"))
+    if pcols and "price_tiers" not in pcols:
+        sync_conn.execute(text("ALTER TABLE products ADD COLUMN price_tiers TEXT"))
+
+    ocols = cols("orders")
+    if ocols and "quantity" not in ocols:
+        sync_conn.execute(
+            text("ALTER TABLE orders ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1")
+        )
+    if ocols and "unit_price" not in ocols:
+        sync_conn.execute(
+            text("ALTER TABLE orders ADD COLUMN unit_price INTEGER NOT NULL DEFAULT 0")
+        )
 
 
 async def dispose_engine() -> None:

@@ -181,6 +181,36 @@ async def cmd_product_note(
     )
 
 
+@router.message(Command("product_tiers"))
+async def cmd_product_tiers(
+    message: Message, services: Container, command: CommandObject
+) -> None:
+    """Set bulk-discount tiers: /product_tiers <id> 1:1800,5:1600,10:1500"""
+    if not _admin_only(message, services):
+        return
+    from services import pricing
+
+    parts = (command.args or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("形式: /product_tiers <id> 1:1800,5:1600,10:1500,50:1000")
+        return
+    try:
+        pid = int(parts[0].strip())
+    except ValueError:
+        await message.answer("IDは整数で入力してください。")
+        return
+    if await services.products.get(pid) is None:
+        await message.answer("商品が見つかりません。")
+        return
+    tiers_json = pricing.parse_tiers_text(parts[1])
+    if tiers_json is None:
+        await message.answer("価格の形式が違います。例: 1:1800,5:1600,10:1500")
+        return
+    await services.products.set_tiers(pid, tiers_json)
+    tiers = pricing.parse_tiers(tiers_json, 0)
+    await message.answer("✅ 価格を設定しました。\n" + pricing.format_tiers(tiers))
+
+
 @router.message(Command("product_delete"))
 async def cmd_product_delete(
     message: Message, services: Container, command: CommandObject

@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from database.models import Product
 from database.repository import InventoryRepository, ProductRepository
+
+
+from services import pricing
 
 
 @dataclass(slots=True)
@@ -19,6 +21,17 @@ class ProductView:
     active: bool
     available_stock: int
     notes: str | None = None
+    price_tiers: str | None = None
+
+    @property
+    def tiers(self) -> list["pricing.Tier"]:
+        return pricing.parse_tiers(self.price_tiers, self.price)
+
+    def unit_price(self, quantity: int) -> int:
+        return pricing.unit_price_for(quantity, self.tiers)
+
+    def total(self, quantity: int) -> int:
+        return pricing.total_for(quantity, self.tiers)
 
 
 class ProductService:
@@ -48,6 +61,26 @@ class ProductService:
             await session.commit()
             return updated is not None
 
+    async def set_tiers(self, product_id: int, tiers_json: str) -> bool:
+        """Set the bulk-discount price tiers (stored JSON)."""
+        async with self._sm() as session:
+            updated = await ProductRepository(session).update_fields(
+                product_id, price_tiers=tiers_json
+            )
+            await session.commit()
+            return updated is not None
+
+    async def get_view(self, product_id: int) -> ProductView | None:
+        async with self._sm() as session:
+            p = await ProductRepository(session).get(product_id)
+            if p is None:
+                return None
+            stock = await InventoryRepository(session).count_available(p.id)
+            return ProductView(
+                p.id, p.name, p.price, p.description, p.active, stock,
+                p.notes, p.price_tiers,
+            )
+
     async def delete(self, product_id: int) -> bool:
         async with self._sm() as session:
             ok = await ProductRepository(session).deactivate(product_id)
@@ -66,7 +99,7 @@ class ProductService:
             for p in await prepo.list_active():
                 stock = await irepo.count_available(p.id)
                 views.append(
-                    ProductView(p.id, p.name, p.price, p.description, p.active, stock, p.notes)
+                    ProductView(p.id, p.name, p.price, p.description, p.active, stock, p.notes, p.price_tiers)
                 )
             return views
 
@@ -78,6 +111,6 @@ class ProductService:
             for p in await prepo.list_all():
                 stock = await irepo.count_available(p.id)
                 views.append(
-                    ProductView(p.id, p.name, p.price, p.description, p.active, stock, p.notes)
+                    ProductView(p.id, p.name, p.price, p.description, p.active, stock, p.notes, p.price_tiers)
                 )
             return views

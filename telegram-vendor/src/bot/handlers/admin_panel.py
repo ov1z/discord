@@ -271,6 +271,71 @@ async def on_note(message: Message, services: Container, state: FSMContext) -> N
 
 
 # --------------------------------------------------------------------------- #
+# Price tiers (bulk discount)
+# --------------------------------------------------------------------------- #
+@router.callback_query(F.data == "ap:tiers")
+async def cb_tiers_pick(callback: CallbackQuery, services: Container) -> None:
+    if not _is_admin_cb(callback, services):
+        await callback.answer("権限がありません。", show_alert=True)
+        return
+    products = await services.products.list_all()
+    if not products:
+        await callback.answer("先に商品を追加してください。", show_alert=True)
+        return
+    await _show(callback, "💹 価格を設定する商品を選んでください:",
+                kb.product_picker_keyboard(products, "tierp"))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ap:tierp:"))
+async def cb_tiers_start(callback: CallbackQuery, services: Container, state: FSMContext) -> None:
+    if not _is_admin_cb(callback, services):
+        await callback.answer("権限がありません。", show_alert=True)
+        return
+    pid = int(callback.data.split(":")[2])
+    view = await services.products.get_view(pid)
+    if view is None:
+        await callback.answer("商品が見つかりません。", show_alert=True)
+        return
+    from services import pricing
+    await state.set_state(AdminStates.SET_TIERS)
+    await state.update_data(product_id=pid)
+    await _show(
+        callback,
+        f"💹「{view.name}」の数量別価格を送ってください。\n\n"
+        "形式: 数量:単価 をカンマ区切り\n"
+        "例: 1:1800,5:1600,10:1500,50:1000\n\n"
+        f"現在:\n{pricing.format_tiers(view.tiers)}",
+        kb.cancel_input_keyboard("ap:products"),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.SET_TIERS, F.text)
+async def on_tiers(message: Message, services: Container, state: FSMContext) -> None:
+    if message.from_user is None or not services.is_admin(message.from_user.id):
+        return
+    from services import pricing
+    data = await state.get_data()
+    pid = data.get("product_id")
+    if pid is None:
+        await state.clear()
+        await message.answer("対象商品が不明です。最初からやり直してください。")
+        return
+    tiers_json = pricing.parse_tiers_text(message.text or "")
+    if tiers_json is None:
+        await message.answer("形式が違います。例: 1:1800,5:1600,10:1500,50:1000")
+        return
+    await services.products.set_tiers(pid, tiers_json)
+    await state.clear()
+    tiers = pricing.parse_tiers(tiers_json, 0)
+    await message.answer(
+        "✅ 価格を設定しました。\n" + pricing.format_tiers(tiers),
+        reply_markup=kb.products_menu_keyboard(),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Stock overview
 # --------------------------------------------------------------------------- #
 @router.callback_query(F.data == "ap:stock")

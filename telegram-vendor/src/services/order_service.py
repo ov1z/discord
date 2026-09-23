@@ -9,7 +9,12 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from database.models import Order, OrderStatus
-from database.repository import OrderRepository, ProductRepository
+from database.repository import (
+    InventoryRepository,
+    OrderRepository,
+    ProductRepository,
+)
+from services import pricing
 
 _CODE_ALPHABET = string.ascii_uppercase + string.digits
 # Avoid ambiguous characters.
@@ -34,9 +39,12 @@ class CreateOrderResult:
     order_id: int
     order_code: str
     product_name: str
-    price: int
+    price: int            # total the buyer must pay
     expires_at: datetime
+    quantity: int = 1
+    unit_price: int = 0
     reused: bool = False  # an existing active order was returned
+    out_of_stock: bool = False
 
 
 class OrderService:
@@ -49,37 +57,61 @@ class OrderService:
         self._ttl = ttl_seconds
 
     async def create_order(
-        self, telegram_user_id: int, product_id: int
+        self, telegram_user_id: int, product_id: int, quantity: int = 1
     ) -> CreateOrderResult | None:
-        """Create a WAITING_PAYMENT order.
+        """Create a WAITING_PAYMENT order for *quantity* units.
 
-        Idempotent against double button presses: if the user already has an
-        active order for this product, that one is returned instead of a new one.
+        Price uses the product's bulk-discount tiers (total = qty * unit_price).
+        Idempotent against double presses: an existing WAITING_PAYMENT order for
+        the same product is updated to the new quantity and reused; an order
+        that already progressed is returned as-is.
         Returns None if the product is missing/inactive.
         """
+        quantity = max(1, quantity)
         async with self._sm() as session:
             prepo = ProductRepository(session)
+            irepo = InventoryRepository(session)
             orepo = OrderRepository(session)
             product = await prepo.get(product_id)
             if product is None or not product.active:
                 return None
 
+            tiers = pricing.parse_tiers(product.price_tiers, product.price)
+            unit_price = pricing.unit_price_for(quantity, tiers)
+            total = quantity * unit_price
+
+            available = await irepo.count_available(product_id)
+
             existing = await orepo.get_active_for_user_product(
                 telegram_user_id, product_id
             )
             if existing is not None:
+                # Only a not-yet-paid order can be re-priced safely.
+                if existing.status == OrderStatus.WAITING_PAYMENT.value:
+                    existing.quantity = quantity
+                    existing.unit_price = unit_price
+                    existing.price = total
+                    await session.commit()
                 exp = _aware(existing.expires_at) or datetime.now(timezone.utc)
                 return CreateOrderResult(
                     order_id=existing.id,
                     order_code=existing.order_code,
                     product_name=product.name,
                     price=existing.price,
+                    quantity=existing.quantity,
+                    unit_price=existing.unit_price,
                     expires_at=exp,
                     reused=True,
+                    out_of_stock=available < existing.quantity,
                 )
 
-            # Unique order_code (retry a few times on the astronomically rare
-            # collision).
+            if available < quantity:
+                return CreateOrderResult(
+                    order_id=0, order_code="", product_name=product.name,
+                    price=total, quantity=quantity, unit_price=unit_price,
+                    expires_at=datetime.now(timezone.utc), out_of_stock=True,
+                )
+
             for _ in range(5):
                 code = generate_order_code()
                 if await orepo.get_by_code(code) is None:
@@ -89,8 +121,10 @@ class OrderService:
                 order_code=code,
                 telegram_user_id=telegram_user_id,
                 product_id=product_id,
-                price=product.price,
+                price=total,
                 expires_at=expires_at,
+                quantity=quantity,
+                unit_price=unit_price,
             )
             await session.commit()
             return CreateOrderResult(
@@ -98,6 +132,8 @@ class OrderService:
                 order_code=order.order_code,
                 product_name=product.name,
                 price=order.price,
+                quantity=quantity,
+                unit_price=unit_price,
                 expires_at=expires_at,
             )
 

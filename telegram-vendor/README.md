@@ -31,7 +31,7 @@ Telegram 上で動作する**デジタル商品の自動販売Bot**です。
 - 実行は **日本国内IP** 必須（国外は CloudFront 403）。`playwright install chromium` が必要。
 
 **既定は `PAYMENT_PROVIDER=mock`** で、ネットワーク/ブラウザなしに全フローが動作します
-（テスト47件パス）。実PayPayは `PAYMENT_PROVIDER=paypay` で有効化。
+（テスト54件パス）。実PayPayは `PAYMENT_PROVIDER=paypay` で有効化。
 
 > ⚠️ 実接続はまだ実口座での通し確認をしていません。最初は少額でテストし、
 > レスポンス差異があれば `src/paypay/client.py` の `_parse_link_info` を調整してください。
@@ -58,7 +58,7 @@ src/
   services/          order / payment / inventory / product / paypay
   database/          engine / models / repository
   security/          crypto(Fernet) / redaction
-tests/               pytest（47件）
+tests/               pytest（54件）
 docs/paypay-api.md   API調査(確度付き)
 tools/               HAR/JSON/ログ解析
 ```
@@ -126,15 +126,18 @@ PYTHONPATH=src python src/main.py
 ## 使い方
 
 ### 一般ユーザー
-- `/start` … 商品一覧を表示、`[購入する]` で注文開始
-- 案内に従い、指定金額の **PayPay 送金リンク**をチャットに送信
-- 金額が一致すれば Bot が自動受取 → 商品を自動配布
+- `/start` … 商品一覧（各商品ボタンに 価格・在庫、在庫0は「入荷待ち」）
+- 商品を押すと**詳細画面**（説明・数量別単価・在庫）が開く
+- **数量ボタン**（1個 / 5個 / 10個 …、まとめ買いは割引単価・合計を表示）または
+  「🔢 数量を入力」で任意個数を選ぶ → **一度に複数個購入できる**
+- 案内された合計金額の **PayPay 送金リンク**をチャットに送信
+- 金額が合計と一致すれば Bot が自動受取 → 選んだ個数分の商品をまとめて自動配布
 
 ### 管理者（`ADMIN_TELEGRAM_ID` と一致する場合のみ）
 
 **ボタン操作パネル（推奨・コマンド入力不要）**
 `/admin` を送るとインラインボタンのパネルが開きます。以降はタップだけで操作できます:
-- 🛍 商品管理 … ➕商品追加 / 📦在庫追加 / 📝注意事項設定 / 🗑商品削除
+- 🛍 商品管理 … ➕商品追加 / 📦在庫追加 / 📝注意事項設定 / 💹価格設定(まとめ買い割引) / 🗑商品削除
 - 📦 在庫追加 … 商品をボタンで選び、在庫を1行1つ送るだけ
 - 📋 注文管理 … 未配布・保留・状態不明の注文を一覧 → 選ぶと [📤再配布][🔍入金再確認][❌キャンセル]
 - 📊 在庫状況 … 商品ごとの在庫/予約/販売済
@@ -150,6 +153,7 @@ PYTHONPATH=src python src/main.py
 /product_add 商品A|500|説明        # 追加
 /product_list                      # 一覧
 /product_edit 1|price|800          # 編集(field=name|price|description|active)
+/product_tiers 1 1:1800,5:1600,10:1500,50:1000   # 数量別単価(まとめ買い割引)
 /product_delete 1                  # 無効化
 ```
 
@@ -230,7 +234,7 @@ https://example.local/pay/<金額>/<任意ID>
 
 自動テスト:
 ```bash
-python -m pytest -q          # 47 tests
+python -m pytest -q          # 54 tests
 ```
 
 ---
@@ -346,7 +350,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 ### 4. 動作確認
 ```bash
-python -m pytest -q                  # 47 tests
+python -m pytest -q                  # 54 tests
 PYTHONPATH=src python src/main.py    # 起動（既定は mock プロバイダ）
 ```
 

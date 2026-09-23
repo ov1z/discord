@@ -29,7 +29,10 @@ async def deliver_to_buyer(
 
     Returns True if the buyer received the goods.
     """
-    if not result.delivered_content:
+    contents = result.delivered_contents or (
+        [result.delivered_content] if result.delivered_content else []
+    )
+    if not contents:
         return False
 
     order = await container.orders.get(order_id)
@@ -41,9 +44,14 @@ async def deliver_to_buyer(
             product_name = product.name
             product_notes = product.notes
 
+    if len(contents) == 1:
+        goods = f"商品: {contents[0]}"
+    else:
+        body = "\n".join(f"{i}. {c}" for i, c in enumerate(contents, 1))
+        goods = f"商品（{len(contents)}個）:\n{body}"
     text = (
         "購入ありがとうございます。\n\n"
-        f"商品: {result.delivered_content}\n"
+        f"{goods}\n"
         f"注文ID: {result.order_code}\n"
         f"決済金額: {result.expected_amount}円"
     )

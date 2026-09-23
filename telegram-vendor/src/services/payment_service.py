@@ -59,7 +59,8 @@ class PurchaseResult:
     order_code: str
     expected_amount: int
     actual_amount: int | None = None
-    delivered_content: str | None = None
+    delivered_content: str | None = None       # first item (kept for compat)
+    delivered_contents: list[str] | None = None  # all items for the quantity
     payment_id: str | None = None
 
 
@@ -322,15 +323,18 @@ class PaymentService:
             order = await OrderRepository(session).get(order_id)
             if order is None:
                 raise ValueError("order not found")
+            quantity = order.quantity or 1
             if order.status == OrderStatus.DELIVERED.value:
-                item = await InventoryRepository(session).get_reserved_for_order(
+                items = await InventoryRepository(session).list_reserved_for_order(
                     order_id
                 )
+                contents = [it.content for it in items]
                 return PurchaseResult(
                     PurchaseOutcome.DELIVERED,
                     order_code,
                     expected,
-                    delivered_content=item.content if item else None,
+                    delivered_content=contents[0] if contents else None,
+                    delivered_contents=contents or None,
                     payment_id=payment_id,
                 )
             if order.status not in (
@@ -346,9 +350,9 @@ class PaymentService:
             irepo = InventoryRepository(session)
             order = await OrderRepository(session).get(order_id)
             assert order is not None
-            item = await irepo.reserve_one(order.product_id, order_id)
-            if item is None:
-                # PAID but no stock: keep money, let admin re-deliver later.
+            items = await irepo.reserve_many(order.product_id, order_id, quantity)
+            if items is None:
+                # PAID but not enough stock: keep money, let admin re-deliver.
                 order.status = OrderStatus.DELIVERING.value
                 await session.commit()
                 return PurchaseResult(
@@ -356,8 +360,7 @@ class PaymentService:
                     payment_id=payment_id,
                 )
             order.status = OrderStatus.DELIVERING.value
-            content = item.content
-            inventory_id = item.id
+            contents = [it.content for it in items]
             await session.commit()
 
         # Mark delivered (the actual Telegram send is done by the caller; if it
@@ -366,7 +369,8 @@ class PaymentService:
             PurchaseOutcome.PAID_NOT_DELIVERED,  # provisional until caller confirms
             order_code,
             expected,
-            delivered_content=content,
+            delivered_content=contents[0] if contents else None,
+            delivered_contents=contents,
             payment_id=payment_id,
         )
 
@@ -378,10 +382,8 @@ class PaymentService:
             order = await orepo.get(order_id)
             if order is None:
                 return
-            item = await irepo.get_reserved_for_order(order_id)
             now = datetime.now(timezone.utc)
-            if item is not None and item.status != "SOLD":
-                await irepo.mark_sold(item.id, now)
+            await irepo.mark_many_sold(order_id, now)
             order.status = OrderStatus.DELIVERED.value
             order.delivered_at = now
             await session.commit()
