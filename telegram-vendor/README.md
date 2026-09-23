@@ -372,6 +372,127 @@ PC の Claude Code に、次のように頼めばそのまま続行できます:
 
 ---
 
+## 常時起動・デプロイ（VPSを使いたくない場合）
+
+### ❌ Cloudflare Workers では動きません（重要）
+このBotは Workers では動作しません。理由:
+- Workers は基本 JS/TS のサーバーレス。**Python の常駐プロセス**、`aiogram` の
+  **ロングポーリング**、`SQLAlchemy` のソケットDB接続は動かせない
+- PayPayログインの WAF 突破に使う **Playwright（ヘッドレスChromium）が Workers では動かない**
+- Workers はリクエスト単位・CPU時間制限があり「常に待ち受ける」用途に不向き
+
+> Workers に載せるには「JSで全面書き直し＋Telegram webhook＋D1/KV＋ブラウザは
+> Cloudflare Browser Rendering」といった別物への作り替えが必要で、現実的ではありません。
+
+### ✅ このBotに向く常時起動先（コンテナを東京リージョンで動かす）
+
+**最重要**: 実PayPayを使うなら **日本IP必須**（海外リージョンは PayPay が 403）。
+必ず**東京/大阪リージョン**を選ぶか、日本のプロキシを使ってください。
+（`PAYMENT_PROVIDER=mock` のテストだけなら海外リージョンでもOK）
+
+| 選択肢 | 無料枠 | 日本リージョン | 備考 |
+|--------|--------|----------------|------|
+| **Fly.io**（推奨） | 少額の無料相当枠 | ✅ `nrt`(東京) | Dockerでそのまま。`fly.toml` 同梱 |
+| **Oracle Cloud Always Free** | 完全無料のVM | ✅ 東京/大阪 | 実質VMだが無料。Docker or 直接実行 |
+| Railway / Render | 限定的（スリープ有） | ⚠️ 主に海外 | 常時起動は有料寄り。PayPayは要プロキシ |
+| 自宅PC / Raspberry Pi | 無料 | ✅ 国内 | 電気代のみ。回線が国内IP |
+
+### Fly.io での手順（推奨・Docker同梱）
+```bash
+# 1. flyctl を入れてログイン
+curl -L https://fly.io/install.sh | sh
+fly auth login
+
+# 2. アプリ作成（fly.toml の app 名を一意な名前に変更してから）
+fly launch --no-deploy --copy-config --name <あなたのアプリ名> --region nrt
+
+# 3. データ永続化用ボリューム（SQLite と暗号化セッションを保持）
+fly volume create data --region nrt --size 1
+
+# 4. 秘密情報を登録（.env は使わず fly secrets に入れる）
+fly secrets set \
+  TELEGRAM_BOT_TOKEN=xxxxx \
+  ADMIN_TELEGRAM_ID=123456789 \
+  SESSION_ENCRYPTION_KEY="$(python -c 'from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())')" \
+  PAYMENT_PROVIDER=paypay
+
+# 5. デプロイ（Chromium入りイメージがビルドされる）
+fly deploy
+```
+- `fly.toml` は東京リージョン・常時1台起動（スリープ無し）・`/data` にDB永続化。
+- 起動後、Telegramで管理者から `/login` → 電話番号:パスワード → OTL でPayPayログイン。
+- ログ確認: `fly logs`。再デプロイしてもDBと暗号化セッションは `/data` に残ります。
+
+### Oracle Cloud Always Free（完全無料）
+東京/大阪リージョンで「Always Free」のVMインスタンスを作成 →
+`git clone` → `docker build -t vendor . && docker run -d --env-file .env -v $PWD/data:/data vendor`、
+または「セットアップ」章のとおり venv で直接起動。無料で24時間動きます。
+
+### 補足
+- **Telegram はロングポーリング**なので、インバウンドのポート開放や独自ドメインは不要。
+- 将来 webhook 化したい場合は `aiogram` の webhook 対応に差し替え可能（現状は未実装）。
+- どのホストでも「日本IP」と「Chromium(約1GBメモリ)」だけ満たせば動きます。
+
+---
+
+## 🤝 引き継ぎガイド（別のAI・別の人が続きを作るとき）
+
+このプロジェクトは**層ごとに責務が分離**されているので、どこを触ればよいか明確です。
+新しいAIに渡すときは「このREADMEと `TODO.md`/`TODO_PAYPAY.md` を読んで」と伝えれば続行できます。
+
+### 全体像（データの流れ）
+```
+Telegram(handler)  →  service  →  PaymentProvider  →  PayPayClient(HTTP)
+   bot/               services/    payments/           paypay/
+購入者/管理者の操作   業務ロジック   決済の抽象化        PayPay通信(唯一のHTTP)
+```
+- **handler は PayPay を直接叩かない**。必ず service 経由。
+- PayPay仕様が変わったら **`src/paypay/` だけ**直せば全体が動く。
+- 決済は `PaymentProvider` 抽象で差し替え可能（`mock` / `paypay`）。テストは `mock`。
+
+### ディレクトリ責務
+| 場所 | 役割 | よく触る場面 |
+|------|------|--------------|
+| `src/bot/handlers/` | Telegramの入口（コマンド/ボタン/FSM） | UI・操作を足す |
+| `src/bot/keyboards/` | インラインボタン定義 | ボタン追加・文言変更 |
+| `src/bot/states/` | FSM状態 | 入力フロー追加 |
+| `src/services/` | 業務ロジック（注文/在庫/決済/価格/ユーザー） | 仕様変更の主戦場 |
+| `src/payments/` | 決済抽象 + mock + paypay 実装 | 受取ロジック |
+| `src/paypay/` | PayPay通信・ログイン・セッション | 実API調整はここだけ |
+| `src/database/` | モデル/エンジン/リポジトリ(SQL) | テーブル・クエリ |
+| `src/security/` | 暗号化(Fernet)・秘密情報マスク | ほぼ固定 |
+| `tests/` | pytest（挙動の仕様書も兼ねる） | 変更したら必ず更新 |
+
+### 主要な不変条件（壊してはいけない設計）
+1. **金額は完全一致**でのみ受取（合計＝数量×単価）。
+2. 受取API成功だけで配布せず、`get_payment_status` で**最終確認**してから `PAID`。
+3. 通信断/timeout は `FAILED` にせず **`PAYMENT_UNKNOWN`**（二重受取防止）。
+4. **一次保留**は配布せず、購入者に解除を促し `HOLD_RECHECK_SECONDS` 後に自動再確認。
+5. 在庫確保は**原子的**（複数個 `reserve_many`）で二重確保しない。
+6. 全処理は**冪等**（二重送信・再起動でも二重決済/配布しない）。
+7. 秘密情報（トークン/パスワード/OTP/電話/Cookie）は**保存・ログ・例外・DBに出さない**。
+
+### よくある追加作業の入口
+- 新しいコマンド/ボタン → `src/bot/handlers/` と `src/bot/keyboards/`
+- 価格・数量の仕様変更 → `src/services/pricing.py`, `order_service.py`
+- 受取・保留の挙動 → `src/services/payment_service.py`, `src/payments/paypay.py`
+- 実PayPayレスポンス調整 → `src/paypay/client.py` の `_parse_link_info`
+- DBカラム追加 → `src/database/models.py` ＋ `engine.py` の `_ensure_new_columns`
+  （簡易マイグレーション。既存DBにも自動でカラム追加される）
+
+### 変更したら必ず
+```bash
+python -m pytest -q          # 全テスト（現在54件）
+```
+テストが緑なら、コミット/プッシュ。
+
+### 続きの起点ファイル
+- `TODO.md` … 実装状況（Phase別）
+- `TODO_PAYPAY.md` … PayPay実接続の残タスク（実口座確認・API確定）
+- `docs/paypay-api.md` … 判明済みPayPay API（CONFIRMED/LIKELY/UNKNOWN）
+
+---
+
 ## トラブルシューティング
 
 | 症状 | 対処 |
@@ -379,8 +500,10 @@ PC の Claude Code に、次のように頼めばそのまま続行できます:
 | `TELEGRAM_BOT_TOKEN is not set` | `.env` を作成・設定 |
 | `SESSION_ENCRYPTION_KEY is empty` | Fernet キーを生成して設定 |
 | `Failed to decrypt session` | 暗号化キーを変えた/破損。`/logout` 後に再ログイン |
-| PayPay 403 (国外IP) | 日本国内IP または日本のプロキシを使用 |
-| PayPay 新規ログインが進まない | anti-bot のため未接続。`TODO_PAYPAY.md` 参照、トークン投入で運用 |
+| PayPay 403 (国外IP) | 日本国内IP必須。ホストを東京/大阪リージョンに、または日本プロキシ |
+| Cloudflare Workers で動かしたい | 不可（Python常駐/ポーリング/Playwright非対応）。Fly.io等のコンテナ常時起動を使用 |
+| ログイン時にブラウザ/メモリ落ち | Chromiumに約1GB必要。ホストのメモリを1024MB以上に |
+| デプロイ後に在庫/セッションが消える | 永続ストレージにDBを置く（Fly.ioは`/data`ボリューム、`fly.toml`参照） |
 | `_cffi_backend` エラー | `pip install cffi` を実行 |
 | 入金済みだが未配布 | 在庫追加後 `/retry_delivery ORD-XXXX`、または再起動で自動再配布 |
 | PostgreSQL へ移行 | `DATABASE_URL=postgresql+asyncpg://...` に変更（コード変更不要、`asyncpg` を追加） |

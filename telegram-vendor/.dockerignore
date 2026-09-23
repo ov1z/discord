@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+*.db
+*.sqlite*
+*.enc
+paypay_session*
+.env
+.pytest_cache
+.mypy_cache
+htmlcov
+.coverage
+tools/samples
+*.har
