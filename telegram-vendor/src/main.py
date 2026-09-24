@@ -28,6 +28,7 @@ from database.repository import OrderRepository
 from payments.base import PaymentProvider
 from payments.mock import MockPaymentProvider
 from payments.paypay import PayPayPaymentProvider
+from paypay import auth as paypay_auth
 from paypay.client import PayPayClient
 from paypay.session_store import DeviceStore, PayPaySessionStore
 from security.crypto import Cryptor
@@ -117,6 +118,13 @@ async def main() -> None:
         str(Path(settings.paypay_session_path).with_name("paypay_devices.enc")),
         cryptor,
     )
+    # PayPay traffic (API + login Chromium) goes through PAYPAY_PROXY if set.
+    try:
+        paypay_auth.set_proxy(settings.paypay_proxy)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if paypay_auth.get_proxy():
+        log.info("PayPay proxy: %s", paypay_auth.proxy_display())
     paypay_client = PayPayClient()
     paypay_service = PayPayService(paypay_client, store, devices)
     state = await paypay_service.restore_session()

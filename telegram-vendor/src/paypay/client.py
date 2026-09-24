@@ -82,9 +82,13 @@ class PayPayClient:
     @property
     def http(self) -> httpx.AsyncClient:
         if self._http is None:
-            self._http = httpx.AsyncClient(
-                timeout=self._timeout, transport=self._transport
-            )
+            kwargs: dict = {"timeout": self._timeout}
+            if self._transport is not None:
+                kwargs["transport"] = self._transport  # tests
+            elif auth.get_proxy():
+                # PayPay traffic only; see PAYPAY_PROXY / auth.set_proxy().
+                kwargs["proxy"] = auth.get_proxy()
+            self._http = httpx.AsyncClient(**kwargs)
         return self._http
 
     async def close(self) -> None:

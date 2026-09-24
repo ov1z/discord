@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     payment_provider: str = Field(default="mock", alias="PAYMENT_PROVIDER")
     payment_flow: str = Field(default="link", alias="PAYMENT_FLOW")
 
+    # PayPay通信だけを通すProxy（例: http://user:pass@host:port）。空なら直接接続。
+    paypay_proxy: str = Field(default="", alias="PAYPAY_PROXY")
+
     support_contact: str = Field(default="@anonxdev", alias="SUPPORT_CONTACT")
 
     order_ttl_seconds: int = Field(default=600, alias="ORDER_TTL_SECONDS")

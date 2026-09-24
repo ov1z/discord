@@ -242,7 +242,10 @@ def get_waf_token() -> dict:
     cookies: dict[str, str] = {}
     with sync_playwright() as pw:
         try:
-            browser = pw.chromium.launch(headless=True)
+            launch_kwargs: dict = {"headless": True}
+            if _PROXY:
+                launch_kwargs["proxy"] = playwright_proxy(_PROXY)
+            browser = pw.chromium.launch(**launch_kwargs)
         except PlaywrightError as exc:
             if "Executable doesn" in str(exc) or "playwright install" in str(exc):
                 raise LoginFailed(
@@ -283,7 +286,59 @@ def get_waf_token() -> dict:
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(follow_redirects=False, timeout=30.0)
+    return httpx.Client(follow_redirects=False, timeout=30.0, proxy=_PROXY)
+
+
+# --------------------------------------------------------------------------- #
+# Outbound proxy for PayPay traffic only (PAYPAY_PROXY)
+# --------------------------------------------------------------------------- #
+# Set once at startup via set_proxy(). Used by the sync login/refresh client
+# above and by the Chromium WAF fetch. Telegram traffic never uses it.
+# The URL may contain credentials: never log it (use proxy_display()).
+_PROXY: str | None = None
+
+
+def set_proxy(url: str | None) -> None:
+    global _PROXY
+    url = (url or "").strip()
+    if url:
+        playwright_proxy(url)  # validate early (raises ValueError if unusable)
+    _PROXY = url or None
+
+
+def get_proxy() -> str | None:
+    return _PROXY
+
+
+def proxy_display(url: str | None = None) -> str | None:
+    """'scheme://host:port' without credentials, for status screens/logs."""
+    url = url if url is not None else _PROXY
+    if not url:
+        return None
+    p = urlparse(url)
+    port = f":{p.port}" if p.port else ""
+    return f"{p.scheme}://{p.hostname}{port}"
+
+
+def playwright_proxy(url: str) -> dict:
+    """Convert a proxy URL into Playwright's ``proxy=`` launch option."""
+    p = urlparse(url)
+    if p.scheme not in ("http", "https", "socks5") or not p.hostname or not p.port:
+        raise ValueError(
+            "PAYPAY_PROXY の形式が不正です（例: http://user:pass@host:port）"
+        )
+    if p.scheme == "socks5" and (p.username or p.password):
+        # Chromium cannot authenticate to SOCKS5 proxies.
+        raise ValueError(
+            "認証付きSOCKS5はChromium(ログイン)で使えません。"
+            "HTTP形式のProxy（http://user:pass@host:port）を使ってください"
+        )
+    opt: dict = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+    if p.username:
+        from urllib.parse import unquote
+        opt["username"] = unquote(p.username)
+        opt["password"] = unquote(p.password or "")
+    return opt
 
 
 def _do_par(session: httpx.Client, cookies: dict, headers: dict) -> tuple[str, str]:

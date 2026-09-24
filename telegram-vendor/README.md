@@ -31,7 +31,7 @@ Telegram 上で動作する**デジタル商品の自動販売Bot**です。
 - 実行は **日本国内IP** 必須（国外は CloudFront 403）。`playwright install chromium` が必要。
 
 **既定は `PAYMENT_PROVIDER=mock`** で、ネットワーク/ブラウザなしに全フローが動作します
-（テスト54件パス）。実PayPayは `PAYMENT_PROVIDER=paypay` で有効化。
+（テスト111件パス）。実PayPayは `PAYMENT_PROVIDER=paypay` で有効化。
 
 > ⚠️ 実接続はまだ実口座での通し確認をしていません。最初は少額でテストし、
 > レスポンス差異があれば `src/paypay/client.py` の `_parse_link_info` を調整してください。
@@ -58,7 +58,7 @@ src/
   services/          order / payment / inventory / product / paypay
   database/          engine / models / repository
   security/          crypto(Fernet) / redaction
-tests/               pytest（54件）
+tests/               pytest（111件）
 docs/paypay-api.md   API調査(確度付き)
 tools/               HAR/JSON/ログ解析
 ```
@@ -270,7 +270,7 @@ https://example.local/pay/<金額>/<任意ID>
 
 自動テスト:
 ```bash
-python -m pytest -q          # 54 tests
+python -m pytest -q          # 111 tests
 ```
 
 ---
@@ -346,6 +346,39 @@ password → OTL 2FA → token交換。ブラウザはWAF通行証取得の一�
 > 「受取済みなら配布／まだ受取可能なら1回だけ再受取」の両対応にしてあります。
 > 実際の挙動を確認したら `docs/paypay-api.md` を更新してください。
 
+### PayPay通信をProxy経由にする（`PAYPAY_PROXY`）
+
+VPSのIP（データセンターIP）はPayPayに弾かれやすいので、**PayPay向けの通信だけ**を
+日本のモバイル/住宅IPのProxyに通せます。Telegram の通信は Proxy を通りません（Proxyの通信量を消費しない）。
+
+`.env` に1行追加するだけ:
+```
+PAYPAY_PROXY=http://ユーザー名:パスワード@ホスト:ポート
+```
+
+Proxyを通るもの:
+- PayPay API（リンク確認・受取・状態確認・取引履歴・トークン更新）
+- `/login` 時の WAF 突破用 Chromium と、ログイン処理の通信（**ログインと受取が同じIPになる**）
+
+Proxy選びの条件:
+- **日本のIP**（モバイル回線IPが最も弾かれにくい。住宅IPでも可）
+- **固定(sticky)セッション**に対応していること。リクエストごとにIPが変わる設定(rotating)は、
+  ログイン中や受取中にIPが変わって失敗・警戒の原因になるので避ける
+- **HTTP形式**（`http://user:pass@host:port`）。認証付きSOCKS5は Chromium が非対応のため不可
+- 通信量はごくわずか（従量課金で少量から買えば十分）
+
+注意:
+- パスワードに `@ : / #` などが含まれる場合はURLエンコードする（例: `@` → `%40`）
+- 形式が不正な場合、Botは起動時にエラーメッセージを出して止まります
+- 設定されているかは `/paypay_status` または管理パネルの「💴 PayPay状態」の
+  `Proxy:` 行で確認できます（認証情報は表示しません）
+- Proxy経由の出口IPを確かめる場合（VPS上で）:
+  ```bash
+  curl -x "http://ユーザー名:パスワード@ホスト:ポート" https://api.ipify.org
+  ```
+  日本のIPが返れば OK
+- Proxyを変えたら、念のため `/logout` → `/login` でログインし直すのがおすすめ
+
 ### 安全設計（実API接続時に効く保護）
 - 取引番号は購入者の申告を信用せず、**Bot自身の取引履歴**だけで判定
 - 同一取引は UNIQUE 制約で**一度きり**（同時送信でも片方しか通らない）
@@ -388,7 +421,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 ### 4. 動作確認
 ```bash
-python -m pytest -q                  # 54 tests
+python -m pytest -q                  # 111 tests
 PYTHONPATH=src python src/main.py    # 起動（既定は mock プロバイダ）
 ```
 
@@ -453,6 +486,7 @@ fly secrets set \
   ADMIN_TELEGRAM_ID=123456789 \
   SESSION_ENCRYPTION_KEY="$(python -c 'from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())')" \
   PAYMENT_PROVIDER=paypay
+# Proxyを使う場合は追加で:  fly secrets set PAYPAY_PROXY="http://user:pass@host:port"
 
 # 5. デプロイ（Chromium入りイメージがビルドされる）
 fly deploy
@@ -527,7 +561,7 @@ Telegram(handler)  →  service  →  PaymentProvider  →  PayPayClient(HTTP)
 
 ### 変更したら必ず
 ```bash
-python -m pytest -q          # 全テスト（現在54件）
+python -m pytest -q          # 全テスト（現在111件）
 ```
 テストが緑なら、コミット/プッシュ。
 
@@ -546,6 +580,9 @@ python -m pytest -q          # 全テスト（現在54件）
 | `SESSION_ENCRYPTION_KEY is empty` | Fernet キーを生成して設定 |
 | `Failed to decrypt session` | 暗号化キーを変えた/破損。`/logout` 後に再ログイン |
 | PayPay 403 (国外IP) | 日本国内IP必須。ホストを東京/大阪リージョンに、または日本プロキシ |
+| 起動時に `PAYPAY_PROXY の形式が不正です` | `http://user:pass@host:port` 形式か確認。パスワードの記号はURLエンコード |
+| 認証付きSOCKS5で起動できない | Chromium非対応。Proxy業者でHTTP形式の接続情報に切り替える |
+| Proxy経由でログイン/受取が不安定 | 固定(sticky)セッションにする。rotatingはIPが途中で変わる |
 | Cloudflare Workers で動かしたい | 不可（Python常駐/ポーリング/Playwright非対応）。Fly.io等のコンテナ常時起動を使用 |
 | ログイン時にブラウザ/メモリ落ち | Chromiumに約1GB必要。ホストのメモリを1024MB以上に |
 | デプロイ後に在庫/セッションが消える | 永続ストレージにDBを置く（Fly.ioは`/data`ボリューム、`fly.toml`参照） |

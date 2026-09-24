@@ -16,6 +16,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from paypay import auth as paypay_auth
 from bot.container import Container
 from bot.handlers.admin import do_cancel_order, do_retry_delivery, do_verify_order
 from bot.handlers.login import prompt_login
@@ -589,6 +590,7 @@ async def cb_paypay(callback: CallbackQuery, services: Container) -> None:
         f"トークン有効期限: {exp}\n"
         f"PaymentProvider: {'利用可能' if ready else '利用不可'}\n"
         f"保存済みセッション: {'あり' if view.has_saved_session else 'なし'}"
+        f"\nProxy: {paypay_auth.proxy_display() or 'なし（直接接続）'}"
     )
     await _show(callback, text, kb.paypay_keyboard(authed))
     await callback.answer()

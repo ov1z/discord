@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 SENSITIVE_KEYS: tuple[str, ...] = (
+    "proxy",
     "authorization",
     "access_token",
     "accesstoken",

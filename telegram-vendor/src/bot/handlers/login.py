@@ -15,6 +15,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
+from paypay import auth as paypay_auth
 from bot.container import Container
 from bot.states.login import LoginStates
 from paypay import auth
@@ -107,6 +108,7 @@ def _fmt_status(view, ready: bool) -> str:
         f"PaymentProvider: {'利用可能' if ready else '利用不可'}\n"
         f"最後のAPI通信: {last}\n"
         f"保存済みセッション: {'あり' if view.has_saved_session else 'なし'}"
+        f"\nProxy: {paypay_auth.proxy_display() or 'なし（直接接続）'}"
     )
 
 
