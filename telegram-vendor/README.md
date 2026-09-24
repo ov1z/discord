@@ -38,6 +38,51 @@ Telegram 上で動作する**デジタル商品の自動販売Bot**です。
 
 ---
 
+## 🧭 引き継ぎメモ（今回の変更 & PC側でやること）
+
+> このセクションは作業の引き継ぎ用。読んだら他のAI/人がそのまま続けられるように書いてある。
+
+### 今回のセッションで変えたこと
+- **PayPay通信専用 Proxy（`PAYPAY_PROXY`）を追加**。PayPay向けの通信（API＋ログイン時の
+  Chromium）だけをProxy経由にする。Telegramの通信は経由しない。`/paypay_status` と
+  管理パネルにProxy表示（認証情報は伏せる）、ログ用 redaction に `proxy` を追加。
+  → 詳細は「PayPay通信をProxy経由にする」章。
+- **不正取得対策を強化し、テストで固定**（`tests/test_security.py`）:
+  - 取引番号方式で「注文より前に届いた入金」を拒否（`TRANSACTION_TOO_OLD`）
+  - 購入者のキャンセルを「本人の未払い注文のみ」に制限（`cancel_for_user`）
+  - `paypay/models.py` の `RequestLink`/`Transaction` 重複定義を削除
+  - 無効リンク・金額改ざん・古い/使用済み/送金/未完了取引・他人の注文キャンセルを検証
+- **住宅Proxyの調査**を反映（「Proxy」章の比較表）。
+
+### ✅ PC側でやること（最優先）: 取引番号方式を削除し「送金リンク受け取り」のみにする
+運用を **送金リンク受け取り一本**にする。**PayPay API（`src/paypay/` の受け取り系）は変更しない**
+＝ `link_check` / `link_receive` はそのまま残す。消すのは「取引番号フローの配線」だけ。
+
+消す/直す対象:
+- `src/config.py`: `payment_flow` フィールドと `is_request_flow`(プロパティ) を削除。`.env.example` の `PAYMENT_FLOW` 行も削除。
+- `src/bot/states/purchase.py`: `WAITING_TRANSACTION_ID` を削除。
+- `src/bot/handlers/purchase.py`: `on_transaction_id` ハンドラと取引番号への分岐を削除。購入は必ず `WAITING_PAYPAY_LINK` のみ。冒頭docstringも修正。
+- `src/bot/handlers/products.py`: 注文開始で常に `WAITING_PAYPAY_LINK` に入る（request分岐があれば削除）。
+- `src/services/payment_service.py`: `confirm_by_transaction` / `_confirm_by_transaction` / `_transaction_already_used` / `_claim_transaction` と、`PurchaseOutcome.TRANSACTION_*`（`_NOT_FOUND/_NOT_INCOMING/_NOT_COMPLETED/_TOO_OLD`）を削除。
+- `src/payments/base.py` `paypay.py` `mock.py`: `create_request` / `recent_incoming` / `looks_like_transaction_id` / `supports_requests` を削除（`link_check`/`accept_payment`/`get_payment_status` は残す）。
+- `src/paypay/client.py`: `payment_history` / `create_request_link` など請求・履歴系メソッドを削除。**受け取り系（`link_check`/`link_receive`）は残す**。`paypay/constants.py` の `is_incoming_order_type` が未使用になれば削除。
+- `src/bot/handlers/payment.py`: `buyer_message_for` の `TRANSACTION_*` メッセージを削除。
+- README: 「決済の2方式」章と「取引番号はそのまま信用しない」章を削除し、送金リンク受け取りのみの説明に更新。
+- テスト: `tests/test_transaction_confirm.py` と `tests/test_security.py` の取引番号ケースを削除。`python -m pytest -q` が緑になるまで直す。
+
+Claude Codeへの依頼例:
+> 「取引番号（request/transaction）方式を完全に削除して、送金リンク受け取りのみにして。
+>  `src/paypay/` の受け取りAPIは変更しないで。上のREADMEの削除リストに沿って直し、
+>  関連テストも消して `pytest` を緑にして」
+
+### 任意（推奨）: 二重配布のさらなる防止
+配布のTelegram送信が per-order ロックの外にあるため、稀に「自動配布」と「管理者の再配布/
+起動時復旧/保留再確認」が競合して同じ商品を2回送る可能性がある（支払いは1回だが在庫が
+余分に出る）。対策: `PaymentService` に「予約→送信→確定」をロック内で1回だけ行う
+`deliver_and_send(order_id, sender)` を作り、全配布経路をそれ経由にする。今回は未実装。
+
+---
+
 ## アーキテクチャ
 
 ```
@@ -361,11 +406,24 @@ Proxyを通るもの:
 - `/login` 時の WAF 突破用 Chromium と、ログイン処理の通信（**ログインと受取が同じIPになる**）
 
 Proxy選びの条件:
-- **日本のIP**（モバイル回線IPが最も弾かれにくい。住宅IPでも可）
-- **固定(sticky)セッション**に対応していること。リクエストごとにIPが変わる設定(rotating)は、
-  ログイン中や受取中にIPが変わって失敗・警戒の原因になるので避ける
-- **HTTP形式**（`http://user:pass@host:port`）。認証付きSOCKS5は Chromium が非対応のため不可
-- 通信量はごくわずか（従量課金で少量から買えば十分）
+- **日本のIP**。**住宅(Residential)IP を推奨**（データセンターIPより弾かれにくく、
+  モバイルIPより安い。モバイルはさらに堅いが割高）。
+- **固定(sticky)セッション**必須。リクエストごとにIPが変わる rotating は、ログイン中や
+  受取中にIPが変わって失敗・警戒の原因になるので避ける（TTLで数分固定できるものを選ぶ）。
+- **HTTP形式**（`http://user:pass@host:port`）。認証付きSOCKS5は Chromium が非対応のため不可。
+- 通信量はごくわずか（従量/GBで少量から買えば十分。数GBでかなり持つ）。
+
+住宅Proxy 候補（2026年時点・価格は変動するので公式で要確認）:
+
+| 業者 | 目安（住宅/GB） | sticky | 備考 |
+|------|-----------------|--------|------|
+| **DataImpulse** | **$1/GB** 従量・無期限 | あり（追加料金なし） | 最安級。少量から買えて試しやすい |
+| **Shifter** | $10/月(5GB)〜、大口 $0.48/GB | あり（sid/TTL） | 日本IP 3.1M+ |
+| **SpyderProxy** | **$1.75/GB** | あり | 東京/大阪/横浜/名古屋/福岡の都市指定可 |
+| **Proxy Empire** | $1.50/GB〜 | あり | 住宅/モバイル両方 |
+| Bright Data / Oxylabs | $7〜15/GB | あり | 高機能だがこの用途には割高 |
+
+まず **DataImpulse か SpyderProxy の住宅IPを1〜2GB** 買って、sticky設定で試すのがコスパ良い。
 
 注意:
 - パスワードに `@ : / #` などが含まれる場合はURLエンコードする（例: `@` → `%40`）
