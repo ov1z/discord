@@ -7,15 +7,22 @@ so it can be retried (see /retry_delivery and startup recovery).
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from datetime import datetime, timezone
 
 from aiogram import Bot
 
 from bot.container import Container
+from bot.keyboards.purchase import support_keyboard
 from services.payment_service import PurchaseOutcome, PurchaseResult
 
 logger = logging.getLogger("bot.payment")
+
+
+def _code(value: str) -> str:
+    """Wrap *value* so Telegram renders it as tap-to-copy monospace."""
+    return f"<code>{html.escape(str(value))}</code>"
 
 
 async def deliver_to_buyer(
@@ -45,22 +52,28 @@ async def deliver_to_buyer(
             product_notes = product.notes
 
     if len(contents) == 1:
-        goods = f"商品: {contents[0]}"
+        goods = f"商品（タップでコピー）:\n{_code(contents[0])}"
     else:
-        body = "\n".join(f"{i}. {c}" for i, c in enumerate(contents, 1))
-        goods = f"商品（{len(contents)}個）:\n{body}"
+        body = "\n".join(
+            f"{i}. {_code(c)}" for i, c in enumerate(contents, 1)
+        )
+        goods = f"商品 {len(contents)}個（タップでコピー）:\n{body}"
     text = (
         "購入ありがとうございます。\n\n"
-        f"{goods}\n"
-        f"注文ID: {result.order_code}\n"
-        f"決済金額: {result.expected_amount}円"
+        f"{goods}\n\n"
+        f"注文ID: {_code(result.order_code)}\n"
+        f"決済金額: {result.expected_amount:,}円"
     )
-    # Per-product note / warnings shown right after the delivered item.
     if product_notes and product_notes.strip():
-        text += f"\n\n⚠️ 注意事項:\n{product_notes.strip()}"
+        text += f"\n\n⚠️ 注意事項:\n{html.escape(product_notes.strip())}"
     try:
-        await bot.send_message(buyer_chat_id, text)
-    except Exception:  # noqa: BLE001 - Telegram send may fail for many reasons
+        await bot.send_message(
+            buyer_chat_id,
+            text,
+            parse_mode="HTML",
+            reply_markup=support_keyboard(container.settings.support_url),
+        )
+    except Exception:
         logger.warning(
             "delivery send failed for order %s; kept for retry", result.order_code
         )
@@ -85,7 +98,7 @@ async def _notify_admin_purchase(
     try:
         chat = await bot.get_chat(order.telegram_user_id)
         username = f"@{chat.username}" if chat.username else (chat.first_name or "-")
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     text = (
@@ -101,7 +114,6 @@ async def _notify_admin_purchase(
     await _safe_admin_send(bot, container, text)
 
 
-# Strong refs so scheduled rechecks are not garbage-collected mid-wait.
 _background_tasks: set[asyncio.Task] = set()
 
 
@@ -129,7 +141,7 @@ async def _hold_recheck(
         result = await container.payments.reverify_and_settle(
             order_id, retry_accept=True
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("hold recheck failed for order %s", order_id)
         await notify_admin(
             bot, container, f"⚠️ 保留後の再確認でエラー: 注文ID(内部) {order_id}"
@@ -147,7 +159,7 @@ async def _hold_recheck(
         return
 
     if result.outcome == PurchaseOutcome.DELIVERED:
-        return  # already handled elsewhere
+        return
 
     if result.outcome == PurchaseOutcome.OUT_OF_STOCK:
         text = buyer_message_for(result)
@@ -159,7 +171,6 @@ async def _hold_recheck(
         )
         return
 
-    # Still held / unknown after the wait.
     await _safe_send(
         bot,
         buyer_chat_id,
@@ -177,7 +188,7 @@ async def _hold_recheck(
 async def _safe_send(bot: Bot, chat_id: int, text: str) -> None:
     try:
         await bot.send_message(chat_id, text)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("failed to send message to buyer")
 
 
@@ -191,7 +202,7 @@ async def _safe_admin_send(bot: Bot, container: Container, text: str) -> None:
         return
     try:
         await bot.send_message(admin_id, text)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("failed to notify admin")
 
 
@@ -215,13 +226,18 @@ def buyer_message_for(result: PurchaseResult) -> str | None:
             f"必要金額: {result.expected_amount}円"
         )
     if o == PurchaseOutcome.INVALID_LINK:
-        return "有効なPayPayリンクではありません。もう一度確認してください。"
+        return ("有効なPayPayリンクではありません。\n"
+                "PayPayアプリで作成した送金リンクを貼り付けてください。")
     if o == PurchaseOutcome.LINK_ALREADY_USED:
-        return "このPayPayリンクはすでに使用されています。"
+        return (
+            "この支払いはすでに別の注文で使用されています。\n"
+            "新しくお支払いのうえ、その取引番号を送ってください。"
+        )
     if o == PurchaseOutcome.NOT_ACCEPTABLE:
-        return "このリンクは受け取れません（受取済み/期限切れの可能性）。"
+        return ("このリンクは受け取れません（受取済み、または期限切れの可能性）。\n"
+                "新しい送金リンクを作成して送ってください。")
     if o == PurchaseOutcome.ORDER_EXPIRED:
-        return "注文の有効期限が切れました。もう一度購入し直してください。"
+        return "注文の有効期限が切れました。\n/start からもう一度購入してください。"
     if o == PurchaseOutcome.PROVIDER_NOT_READY:
         return "現在決済を受け付けできません。しばらくしてからお試しください。"
     if o == PurchaseOutcome.PAYMENT_UNKNOWN:
@@ -230,7 +246,6 @@ def buyer_message_for(result: PurchaseResult) -> str | None:
             "確認が取れ次第、商品をお送りします。"
         )
     if o == PurchaseOutcome.PAYMENT_HELD:
-        # Caller appends the recheck deadline (see hold_message()).
         return None
     if o == PurchaseOutcome.OUT_OF_STOCK:
         return (
@@ -238,9 +253,28 @@ def buyer_message_for(result: PurchaseResult) -> str | None:
             "管理者が確認のうえ対応します。"
         )
     if o == PurchaseOutcome.FAILED:
-        return "決済の受け取りに失敗しました。もう一度お試しください。"
+        return ("決済の受け取りに失敗しました。入金は成立していません。\n"
+                "管理者に通知済みです。/start からやり直してください。")
+    if o == PurchaseOutcome.TRANSACTION_NOT_FOUND:
+        return (
+            "その取引番号は、こちらの直近の入金履歴に見つかりませんでした。\n"
+            "・支払いが完了しているか\n"
+            "・番号が正しいか（取引詳細の番号です）\n"
+            "を確認してもう一度送ってください。\n"
+            "反映に少し時間がかかることがあります。"
+        )
+    if o == PurchaseOutcome.TRANSACTION_NOT_INCOMING:
+        return (
+            "その取引は入金として確認できませんでした。\n"
+            "案内した請求リンクから支払った取引の番号を送ってください。"
+        )
+    if o == PurchaseOutcome.TRANSACTION_NOT_COMPLETED:
+        return (
+            "その取引はまだ完了していません。\n"
+            "支払いが完了してからもう一度送ってください。"
+        )
     if o == PurchaseOutcome.ORDER_NOT_WAITING:
-        return "この注文はすでに処理済みです。"
+        return "この注文はすでに処理が終わっています。\n/start から選び直してください。"
     if o == PurchaseOutcome.DELIVERED:
         return "この注文はすでに配布済みです。"
     return None

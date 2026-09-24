@@ -26,7 +26,7 @@ def _container(shop: Shop) -> Container:
         inventory=shop.inventory,
         orders=shop.orders,
         payments=shop.payments,
-        paypay=None,  # type: ignore[arg-type]
+        paypay=None,
         provider=shop.provider,
         users=shop.users,
     )

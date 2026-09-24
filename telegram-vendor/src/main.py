@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -28,7 +29,7 @@ from payments.base import PaymentProvider
 from payments.mock import MockPaymentProvider
 from payments.paypay import PayPayPaymentProvider
 from paypay.client import PayPayClient
-from paypay.session_store import PayPaySessionStore
+from paypay.session_store import DeviceStore, PayPaySessionStore
 from security.crypto import Cryptor
 from services.inventory_service import InventoryService
 from services.order_service import OrderService
@@ -76,11 +77,9 @@ async def _recover_undelivered(bot: Bot, container: Container) -> None:
                 await notify_admin(
                     bot, container, f"⚠️ 未配布注文あり: {code} ({result.outcome.value})"
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logging.getLogger("main").exception("recovery failed for %s", code)
 
-    # PAYMENT_UNKNOWN (timeout / hold whose 1-minute recheck was lost on restart):
-    # settle only if PayPay already reports the link as received.
     async with sm() as session:
         unknown = await OrderRepository(session).list_by_status(
             [OrderStatus.PAYMENT_UNKNOWN.value]
@@ -97,7 +96,7 @@ async def _recover_undelivered(bot: Bot, container: Container) -> None:
                     f"⚠️ 未確定の注文あり: {code}（{result.outcome.value}）。"
                     f"確認後 /verify_order {code}",
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logging.getLogger("main").exception("reverify failed for %s", code)
 
 
@@ -109,22 +108,22 @@ async def main() -> None:
     if not settings.telegram_bot_token:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set (see .env.example)")
 
-    # DB
     init_engine(settings)
     await create_all()
 
-    # PayPay client + session store
     cryptor = Cryptor(settings.session_encryption_key)
     store = PayPaySessionStore(settings.paypay_session_path, cryptor)
+    devices = DeviceStore(
+        str(Path(settings.paypay_session_path).with_name("paypay_devices.enc")),
+        cryptor,
+    )
     paypay_client = PayPayClient()
-    paypay_service = PayPayService(paypay_client, store)
+    paypay_service = PayPayService(paypay_client, store, devices)
     state = await paypay_service.restore_session()
     log.info("PayPay auth state at boot: %s", state.value)
 
-    # Provider
     provider = _build_provider(settings.payment_provider, paypay_client)
 
-    # Services + container
     sm = get_sessionmaker()
     container = Container(
         settings=settings,
@@ -137,13 +136,11 @@ async def main() -> None:
         users=UserService(sm),
     )
 
-    # Bot / dispatcher
     bot = Bot(token=settings.telegram_bot_token)
     dp = Dispatcher(storage=MemoryStorage())
     dp["services"] = container
     dp.include_router(build_root_router())
 
-    # Recovery + admin notice
     await _recover_undelivered(bot, container)
     if settings.payment_provider.lower() == "paypay" and state != AuthState.AUTHENTICATED:
         await notify_admin(

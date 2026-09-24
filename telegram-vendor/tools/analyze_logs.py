@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Scan an HTTP log file for PayPay endpoints and redact secrets.
 
 Usage:
@@ -17,7 +16,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from security.redaction import redact_text  # noqa: E402
+from security.redaction import redact_text
 
 _ENDPOINT_RE = re.compile(r"https?://[\w.-]*paypay\.ne\.jp[^\s\"']*")
 
@@ -34,7 +33,6 @@ def main() -> int:
         if not matches:
             continue
         for m in matches:
-            # Normalize by dropping the query string for counting.
             counter[m.split("?")[0]] += 1
         if not args.summary:
             print(redact_text(line))

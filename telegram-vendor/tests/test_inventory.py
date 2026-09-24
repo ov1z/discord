@@ -22,7 +22,7 @@ async def test_reserve_is_idempotent_per_order(shop: Shop) -> None:
     first = await shop.inventory.reserve_for_order(pid, order.order_id)
     second = await shop.inventory.reserve_for_order(pid, order.order_id)
     assert first is not None and second is not None
-    assert first.id == second.id  # same item, not a second one
+    assert first.id == second.id
     assert await shop.inventory.count_available(pid) == 2
 
 
@@ -36,7 +36,7 @@ async def test_concurrent_reserves_never_share_item(shop: Shop) -> None:
         shop.inventory.reserve_for_order(pid, o2.order_id),
     )
     reserved = [r for r in (r1, r2) if r is not None]
-    assert len(reserved) == 1  # only one buyer gets the single item
+    assert len(reserved) == 1
     assert await shop.inventory.count_available(pid) == 0
 
 

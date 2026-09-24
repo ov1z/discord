@@ -25,9 +25,6 @@ def _admin_only(message: Message, services: Container) -> bool:
     return message.from_user is not None and services.is_admin(message.from_user.id)
 
 
-# --------------------------------------------------------------------------- #
-# Shared order actions (used by slash commands AND the button panel)
-# --------------------------------------------------------------------------- #
 async def do_retry_delivery(
     bot: Bot, services: Container, order: Order
 ) -> str:
@@ -71,9 +68,6 @@ async def do_cancel_order(services: Container, order: Order) -> str:
     return "この注文はキャンセルできません。"
 
 
-# --------------------------------------------------------------------------- #
-# Products
-# --------------------------------------------------------------------------- #
 @router.message(Command("product_add"))
 async def cmd_product_add(
     message: Message, services: Container, command: CommandObject
@@ -181,18 +175,60 @@ async def cmd_product_note(
     )
 
 
+@router.message(Command("product_desc"))
+async def cmd_product_desc(
+    message: Message, services: Container, command: CommandObject
+) -> None:
+    """Set the blurb shown on the product screen before buying.
+
+    形式（1行）:   /product_desc <product_id> 説明テキスト
+    形式（複数行）: /product_desc <product_id>
+                    1行目の説明
+                    2行目の説明
+    """
+    if not _admin_only(message, services):
+        return
+    text = command.args or ""
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "形式: /product_desc <product_id> 商品説明\n"
+            "（product_id の後に改行で複数行の説明も可）"
+        )
+        return
+    try:
+        product_id = int(parts[0].strip())
+    except ValueError:
+        await message.answer("product_id は整数で入力してください。")
+        return
+    if await services.products.get(product_id) is None:
+        await message.answer("指定の商品が見つかりません。")
+        return
+    ok = await services.products.set_description(product_id, parts[1].strip())
+    await message.answer(
+        "商品説明を設定しました。購入画面に反映されます。"
+        if ok else "設定に失敗しました。"
+    )
+
+
 @router.message(Command("product_tiers"))
 async def cmd_product_tiers(
     message: Message, services: Container, command: CommandObject
 ) -> None:
-    """Set bulk-discount tiers: /product_tiers <id> 1:1800,5:1600,10:1500"""
+    """Set the per-quantity price table: /product_tiers <id> 1:500,2:900,3:1300
+
+    Each ``数量:金額`` pair is the TOTAL charged for exactly that quantity.
+    """
     if not _admin_only(message, services):
         return
     from services import pricing
 
     parts = (command.args or "").split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("形式: /product_tiers <id> 1:1800,5:1600,10:1500,50:1000")
+        await message.answer(
+            "形式: /product_tiers <id> 1:500,2:900,3:1300,10:4000\n"
+            "金額は単価ではなく、その個数のときの合計です。"
+        )
         return
     try:
         pid = int(parts[0].strip())
@@ -204,11 +240,45 @@ async def cmd_product_tiers(
         return
     tiers_json = pricing.parse_tiers_text(parts[1])
     if tiers_json is None:
-        await message.answer("価格の形式が違います。例: 1:1800,5:1600,10:1500")
+        await message.answer("価格の形式が違います。例: 1:500,2:900,3:1300")
         return
     await services.products.set_tiers(pid, tiers_json)
     tiers = pricing.parse_tiers(tiers_json, 0)
     await message.answer("✅ 価格を設定しました。\n" + pricing.format_tiers(tiers))
+
+
+@router.message(Command("product_bulk"))
+async def cmd_product_bulk(
+    message: Message, services: Container, command: CommandObject
+) -> None:
+    """Show or hide the multi-quantity buttons: /product_bulk <id> on|off"""
+    if not _admin_only(message, services):
+        return
+    parts = (command.args or "").split()
+    if len(parts) < 2:
+        await message.answer("形式: /product_bulk <id> on|off")
+        return
+    try:
+        pid = int(parts[0].strip())
+    except ValueError:
+        await message.answer("IDは整数で入力してください。")
+        return
+    flag = parts[1].strip().lower()
+    if flag in ("on", "表示", "1", "true"):
+        show = True
+    elif flag in ("off", "非表示", "0", "false"):
+        show = False
+    else:
+        await message.answer("on か off で指定してください。")
+        return
+    if not await services.products.set_bulk_buttons(pid, show):
+        await message.answer("商品が見つかりません。")
+        return
+    await message.answer(
+        "✅ まとめ買いボタンを表示にしました。"
+        if show
+        else "✅ まとめ買いボタンを非表示にしました（1個と数量入力のみ）。"
+    )
 
 
 @router.message(Command("product_delete"))
@@ -226,9 +296,6 @@ async def cmd_product_delete(
     await message.answer("商品を無効化しました。" if ok else "商品が見つかりません。")
 
 
-# --------------------------------------------------------------------------- #
-# Stock
-# --------------------------------------------------------------------------- #
 async def _handle_stock_add(
     message: Message, services: Container, command: CommandObject, cmd: str
 ) -> None:
@@ -321,9 +388,6 @@ async def cmd_stock_list(
     await message.answer("\n".join(lines))
 
 
-# --------------------------------------------------------------------------- #
-# Orders
-# --------------------------------------------------------------------------- #
 @router.message(Command("orders"))
 async def cmd_orders(message: Message, services: Container) -> None:
     if not _admin_only(message, services):

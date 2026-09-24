@@ -42,7 +42,6 @@ async def test_expiry(shop: Shop) -> None:
     pid = await make_product_with_stock(shop)
     result = await shop.orders.create_order(7, pid)
     assert result is not None
-    # Force expiry in the past.
     async with shop.sm() as session:
         order = await OrderRepository(session).get(result.order_id)
         order.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)

@@ -5,6 +5,9 @@ Never store PayPay tokens on disk in plaintext.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+
 from cryptography.fernet import Fernet, InvalidToken
 
 
@@ -29,11 +32,20 @@ class Cryptor:
             )
         try:
             self._fernet = Fernet(key.encode("utf-8"))
-        except (ValueError, TypeError) as exc:  # invalid key format
+        except (ValueError, TypeError) as exc:
             raise CryptoError("Invalid SESSION_ENCRYPTION_KEY format") from exc
+        self._key = key.encode("utf-8")
 
     def encrypt(self, plaintext: str) -> bytes:
         return self._fernet.encrypt(plaintext.encode("utf-8"))
+
+    def digest(self, value: str) -> str:
+        """Stable, non-reversible id for *value*, keyed by the session key.
+
+        Lets data be indexed by a secret (a phone number) without the secret
+        ever being written down.
+        """
+        return hmac.new(self._key, value.encode("utf-8"), hashlib.sha256).hexdigest()
 
     def decrypt(self, token: bytes) -> str:
         try:

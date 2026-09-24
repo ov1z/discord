@@ -21,7 +21,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import re
 import secrets
+import time
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
@@ -43,7 +45,6 @@ UA = (
     "Chrome/147.0.7727.138 Mobile Safari/537.36 jp.pay2.app.android/5.50.0"
 )
 
-# Static Android-app style headers (verified against a working 2026 client).
 _HEADERS_BASE: dict[str, str] = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "ja-JP,ja;q=0.9",
@@ -66,19 +67,34 @@ _HEADERS_BASE: dict[str, str] = {
     "Device-Lock-Type": "DEVICE",
     "Device-Lock-App-Setting": "false",
     "Device-In-Call": "false",
+    "Device-Screen-Recording": "false",
     "App-Mode": "domestic_automatic",
+    "Device-App-Check": "FAILURE - UNKNOWN",
+    "Device-Acceleration": "-0.0040711286_3.9784907E-4_-0.037927248",
+    "Device-Acceleration-2": "NULL",
+    "Device-Orientation": "-0.7248919_-0.00937534_0.010662667",
+    "Device-Orientation-2": "NULL",
+    "Device-Rotation": "0.74846226_-0.6630254_0.014197531",
+    "Device-Rotation-2": "NULL",
     "Accept-Charset": "UTF-8",
     "Accept-Encoding": "gzip",
 }
+
+_WAF_COOKIE_WAIT_SECONDS = 25
 
 
 class LoginFailed(Exception):
     """Internal login failure with a SAFE message (no secrets)."""
 
 
-# --------------------------------------------------------------------------- #
-# small helpers
-# --------------------------------------------------------------------------- #
+STAGE_WAF = "WAF"
+STAGE_SESSION = "SESSION"
+STAGE_PASSWORD = "PASSWORD"
+STAGE_OTP_SEND = "OTP_SEND"
+STAGE_OTL = "OTL"
+STAGE_TOKEN = "TOKEN"
+
+
 def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
@@ -146,11 +162,54 @@ def _code_from_url(url: str | None) -> str | None:
     return codes[0] if codes else None
 
 
-def extract_verification_code(value: str | None) -> str:
-    """Strip any (possibly doubled) PayPay host prefix, return the raw code."""
+_PAY_LINK_RE = re.compile(
+    r"(?:https?://)?(?:qr|pay|www)\.paypay\.ne\.jp/[^\s<>\"\']+",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"https?://[^\s<>\"\']+", re.IGNORECASE)
+_ID_PARAM_RE = re.compile(r"(?:^|[?&\s])id=([A-Za-z0-9_-]+)", re.IGNORECASE)
+_BARE_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{4,}$")
+_LONG_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{10,}")
+
+
+def extract_otl_id(value: str | None) -> str:
+    """Pull the one-time-link id out of whatever the admin pasted.
+
+    Accepts the bare id, the full sign-in URL, or the entire SMS body with
+    Japanese text around the link, e.g.
+    "[PayPay]ログイン承認時はURLをタップ https://www.paypay.ne.jp/portal/oauth2/l?id=XXXX".
+    """
     if not value:
         return ""
-    value = str(value).strip()
+    text = str(value).strip()
+
+    urls = _URL_RE.findall(text)
+    for url in urls:
+        found = _ID_PARAM_RE.search(url)
+        if found:
+            return found.group(1)
+    for url in urls:
+        tail = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+        if tail and tail.lower() != "l" and _BARE_CODE_RE.match(tail):
+            return tail
+    found = _ID_PARAM_RE.search(text)
+    if found:
+        return found.group(1)
+    if _BARE_CODE_RE.match(text):
+        return text
+    tokens = _LONG_TOKEN_RE.findall(text)
+    if tokens:
+        return max(tokens, key=len)
+    return text
+
+
+def extract_verification_code(value: str | None) -> str:
+    """Return the money link's code, ignoring any text around the link."""
+    if not value:
+        return ""
+    text = str(value).strip()
+    found = _PAY_LINK_RE.search(text)
+    value = found.group(0) if found else text
     changed = True
     while changed:
         changed = False
@@ -171,36 +230,53 @@ def is_paypay_link(url: str) -> bool:
     return "pay.paypay.ne.jp/" in url.strip().lower()
 
 
-# --------------------------------------------------------------------------- #
-# WAF + OAuth2 flow (synchronous)
-# --------------------------------------------------------------------------- #
 def get_waf_token() -> dict:
     """Obtain the AWS WAF cookie via a single headless Chromium page load."""
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:  # pragma: no cover
+        from playwright.sync_api import Error as PlaywrightError, sync_playwright
+    except ImportError as exc:
         raise LoginFailed(
             "playwright 未インストール (pip install playwright && playwright install chromium)"
         ) from exc
 
     cookies: dict[str, str] = {}
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        try:
+            browser = pw.chromium.launch(headless=True)
+        except PlaywrightError as exc:
+            if "Executable doesn" in str(exc) or "playwright install" in str(exc):
+                raise LoginFailed(
+                    "Chromium 未インストールです。"
+                    "`playwright install chromium` を実行してください"
+                ) from exc
+            raise LoginFailed("ブラウザの起動に失敗しました") from exc
         try:
             ctx = browser.new_context(user_agent=UA)
             page = ctx.new_page()
-            page.goto(
-                f"{WEB_BASE}/portal/oauth2/sign-in?client_id={CLIENT_ID}",
-                wait_until="networkidle",
-                timeout=30000,
-            )
-            page.wait_for_timeout(3000)
-            for c in ctx.cookies():
-                cookies[c["name"]] = c["value"]
+            try:
+                page.goto(
+                    f"{WEB_BASE}/portal/oauth2/sign-in?client_id={CLIENT_ID}",
+                    wait_until="domcontentloaded",
+                    timeout=45000,
+                )
+            except PlaywrightError as exc:
+                raise LoginFailed(
+                    "PayPayのサインインページに到達できません"
+                    "（通信環境か、国外IPでないか確認してください）"
+                ) from exc
+            deadline = time.monotonic() + _WAF_COOKIE_WAIT_SECONDS
+            while True:
+                page.wait_for_timeout(1000)
+                cookies = {c["name"]: c["value"] for c in ctx.cookies()}
+                if "aws-waf-token" in cookies or time.monotonic() >= deadline:
+                    break
         finally:
             browser.close()
     if "aws-waf-token" not in cookies:
-        logger.warning("WAF token not acquired")
+        raise LoginFailed(
+            "anti-bot(WAF)トークンを取得できませんでした。"
+            "時間をおくか、日本国内の回線から実行してください"
+        )
     cookies["OA2_last_method"] = "mobile"
     cookies["Lang"] = "ja"
     return cookies
@@ -269,7 +345,6 @@ def _do_password(
     data = r.json()
     _update_cookies(cookies, r)
     if data.get("header", {}).get("resultCode") != "S0000":
-        # Never echo PayPay's raw message (may reflect credentials).
         raise LoginFailed("電話番号またはパスワードが正しくありません")
 
     payload = data.get("payload", {}) or {}
@@ -317,7 +392,13 @@ def _trigger_otp(session: httpx.Client, cookies: dict, headers: dict) -> None:
     ))
 
 
-def _verify_otp_get_code(session: httpx.Client, cookies: dict, otp: str, headers: dict) -> str:
+def _verify_otp_get_code(
+    session: httpx.Client,
+    cookies: dict,
+    otp: str,
+    headers: dict,
+    otp_info: dict | None = None,
+) -> str:
     """OTL flow: click link -> verify -> COMPLETE_OTL / polling -> auth code."""
     hdrs = {
         **headers, "Content-Type": "application/json", "Origin": WEB_BASE,
@@ -326,9 +407,8 @@ def _verify_otp_get_code(session: httpx.Client, cookies: dict, otp: str, headers
         "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin", "X-Requested-With": "jp.ne.paypay.android.app",
     }
-    otp = extract_verification_code(otp) or otp.strip()
+    otp = extract_otl_id(otp) or otp.strip()
 
-    # Consume the one-time link.
     r_get = session.get(
         f"{WEB_BASE}/portal/oauth2/l?id={otp}",
         headers={**headers, "Cookie": _cookie_str(cookies),
@@ -342,19 +422,38 @@ def _verify_otp_get_code(session: httpx.Client, cookies: dict, otp: str, headers
         if loc:
             _update_cookies(cookies, session.get(loc, headers={**headers, "Cookie": _cookie_str(cookies)}))
 
-    for body in ({"code": otp}, {"otp": otp}):
+    otp_info = otp_info or {}
+    otp_ref = otp_info.get("otp_ref") or ""
+    otp_prefix = str(otp_info.get("otp_prefix") or "")
+    for body in (
+        {"code": otp},
+        {"otp": otp},
+        {"code": otp, "otpReferenceId": otp_ref},
+        {"otp": otp, "otpReferenceId": otp_ref, "otpPrefix": otp_prefix},
+    ):
         r = session.post(
             f"{WEB_BASE}/portal/api/v2/oauth2/extension/sign-in/2fa/otl/verify",
             json=body, headers=hdrs,
         )
         _update_cookies(cookies, r)
-        if r.json().get("header", {}).get("resultCode") == "S0000":
-            break
+        try:
+            if r.json().get("header", {}).get("resultCode") == "S0000":
+                break
+        except ValueError:
+            continue
+
+    def _complete(kind: str, payload) -> dict:
+        return {"params": {"extension_id": "user-main-2fa-v1",
+                           "data": {"type": kind, "payload": payload}}}
 
     for body in (
-        {"params": {"extension_id": "user-main-2fa-v1", "data": {"type": "COMPLETE_OTL", "payload": {"code": otp}}}},
-        {"params": {"extension_id": "user-main-2fa-v1", "data": {"type": "COMPLETE_OTL", "payload": None}}},
-        {"params": {"extension_id": "user-main-2fa-v1", "data": {"type": "COMPLETE_OTL", "payload": {}}}},
+        _complete("COMPLETE_OTL", {"code": otp}),
+        _complete("COMPLETE_OTL", {"otlId": otp, "code": otp}),
+        _complete("COMPLETE_OTL", None),
+        _complete("COMPLETE_OTL", {}),
+        _complete("COMPLETE_OTL", {"linkId": otp}),
+        _complete("COMPLETE", {"code": otp}),
+        _complete("OTL_COMPLETE", {"code": otp}),
     ):
         r = session.post(
             f"{WEB_BASE}/portal/api/v2/oauth2/extension/code-grant/update",
@@ -388,6 +487,7 @@ def _verify_otp_get_code(session: httpx.Client, cookies: dict, otp: str, headers
         code = _code_from_url(redirect_url)
         if code:
             return code
+        time.sleep(1)
 
     raise LoginFailed("認証コードが正しくありません")
 
@@ -427,29 +527,53 @@ def refresh_access_token(
         return access_token, payload.get("refreshToken") or refresh_token
 
 
-# --------------------------------------------------------------------------- #
-# Orchestrators used by the async client (run in a worker thread)
-# --------------------------------------------------------------------------- #
-def login_step1(phone: str, password: str, device_uuid: str, client_uuid: str) -> dict:
+def _reporter(on_progress):
+    """Wrap the optional progress callback so it can never break a login."""
+    def report(stage: str) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(stage)
+        except Exception:
+            pass
+    return report
+
+
+def login_step1(
+    phone: str,
+    password: str,
+    device_uuid: str,
+    client_uuid: str,
+    on_progress=None,
+) -> dict:
     """WAF -> PAR -> authorize -> password (-> maybe token if OTP not needed).
 
     Returns one of:
       {"status": "SUCCESS", "access_token", "refresh_token"}
       {"status": "OTP_REQUIRED", "ctx": {...}}   (ctx carries cookies/cv/uuids)
+
+    ``on_progress`` is called with a STAGE_* id before each slow step. It runs
+    on this (worker) thread, so callers must marshal it to their event loop.
     """
+    report = _reporter(on_progress)
+    report(STAGE_WAF)
     cookies = get_waf_token()
     headers = make_headers(device_uuid, client_uuid)
     with _client() as session:
+        report(STAGE_SESSION)
         cv, request_uri = _do_par(session, cookies, headers)
         _do_authorize(session, cookies, request_uri, headers)
+        report(STAGE_PASSWORD)
         pw = _do_password(session, cookies, phone, password, headers)
         if not pw["otp_required"]:
+            report(STAGE_TOKEN)
             access_token, refresh_token = _exchange_token(session, cv, pw["code"], headers)
             return {
                 "status": "SUCCESS",
                 "access_token": access_token,
                 "refresh_token": refresh_token,
             }
+        report(STAGE_OTP_SEND)
         _trigger_otp(session, cookies, headers)
     return {
         "status": "OTP_REQUIRED",
@@ -458,16 +582,24 @@ def login_step1(phone: str, password: str, device_uuid: str, client_uuid: str) -
             "cv": cv,
             "device_uuid": device_uuid,
             "client_uuid": client_uuid,
+            "otp_ref": pw.get("otp_ref"),
+            "otp_prefix": pw.get("otp_prefix"),
         },
     }
 
 
-def login_step2(ctx: dict, otp: str) -> dict:
+def login_step2(ctx: dict, otp: str, on_progress=None) -> dict:
     """OTL verify -> token exchange. Returns {'access_token','refresh_token'}."""
+    report = _reporter(on_progress)
     cookies = dict(ctx["cookies"])
     cv = ctx["cv"]
     headers = make_headers(ctx["device_uuid"], ctx["client_uuid"])
     with _client() as session:
-        code = _verify_otp_get_code(session, cookies, otp, headers)
+        report(STAGE_OTL)
+        code = _verify_otp_get_code(
+            session, cookies, otp, headers,
+            {"otp_ref": ctx.get("otp_ref"), "otp_prefix": ctx.get("otp_prefix")},
+        )
+        report(STAGE_TOKEN)
         access_token, refresh_token = _exchange_token(session, cv, code, headers)
     return {"access_token": access_token, "refresh_token": refresh_token}

@@ -28,7 +28,6 @@ async def test_session_roundtrip_and_encrypted_at_rest(tmp_path) -> None:
         account_id="acc-1",
     )
     await store.save(session)
-    # File on disk must not contain the plaintext token.
     raw = (tmp_path / "sess.enc").read_bytes()
     assert b"SECRET-TOKEN-123" not in raw
 
@@ -100,7 +99,6 @@ async def test_status_never_leaks_token(tmp_path) -> None:
     await svc.adopt_token("VERY-SECRET")
     view = await svc.status(provider_ready=True)
     assert view.state == AuthState.AUTHENTICATED
-    # The view has no token field at all.
     assert "VERY-SECRET" not in repr(view)
 
 

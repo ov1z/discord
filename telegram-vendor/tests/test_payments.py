@@ -34,7 +34,6 @@ async def _status(shop: Shop, order_id: int) -> str:
     return order.status
 
 
-# --------------------------------------------------------------------------- #
 async def test_successful_purchase(shop: Shop) -> None:
     pid = await make_product_with_stock(shop, price=500, stock=2)
     oid = await _new_order(shop, 1, pid)
@@ -42,7 +41,6 @@ async def test_successful_purchase(shop: Shop) -> None:
     assert result.outcome == PurchaseOutcome.PAID_NOT_DELIVERED
     assert result.delivered_content is not None
     assert await _status(shop, oid) == OrderStatus.DELIVERING.value
-    # Buyer received it -> confirm.
     await shop.payments.confirm_delivered(oid)
     assert await _status(shop, oid) == OrderStatus.DELIVERED.value
 
@@ -61,7 +59,6 @@ async def test_amount_excess_not_accepted(shop: Shop) -> None:
     oid = await _new_order(shop, 1, pid)
     result = await shop.payments.process_payment_link(oid, mock_link(600, "HI"))
     assert result.outcome == PurchaseOutcome.AMOUNT_MISMATCH
-    # Not received.
     info = await shop.provider.inspect_payment(mock_link(600, "HI"))
     assert info.status.value == "PENDING"
 
@@ -97,19 +94,16 @@ async def test_cannot_order_when_out_of_stock(shop: Shop) -> None:
     pid = await make_product_with_stock(shop, price=500, stock=0)
     res = await shop.orders.create_order(1, pid)
     assert res is not None and res.out_of_stock is True
-    assert res.order_id == 0  # no order is created
+    assert res.order_id == 0
 
 
 async def test_out_of_stock_after_paid_keeps_money(shop: Shop) -> None:
-    # Order placed while stock existed, but stock is gone by delivery time.
     pid = await make_product_with_stock(shop, price=500, stock=1)
     oid = await _new_order(shop, 1, pid)
-    # A different order grabs the only item first.
     other = await _new_order(shop, 2, pid)
     assert await shop.inventory.reserve_for_order(pid, other) is not None
     result = await shop.payments.process_payment_link(oid, mock_link(500, "NS"))
     assert result.outcome == PurchaseOutcome.OUT_OF_STOCK
-    # Money confirmed: order left in DELIVERING for later re-delivery.
     assert await _status(shop, oid) == OrderStatus.DELIVERING.value
 
 
@@ -136,11 +130,10 @@ async def test_double_submit_is_idempotent(shop: Shop) -> None:
     oid = await _new_order(shop, 1, pid)
     r1 = await shop.payments.process_payment_link(oid, mock_link(500, "DUP"))
     assert r1.outcome == PurchaseOutcome.PAID_NOT_DELIVERED
-    # Second submit while DELIVERING: no double accept, no second item.
     r2 = await shop.payments.process_payment_link(oid, mock_link(500, "DUP"))
     assert r2.outcome == PurchaseOutcome.PAID_NOT_DELIVERED
     assert r2.delivered_content is None
-    assert await shop.inventory.count_available(pid) == 1  # only one consumed
+    assert await shop.inventory.count_available(pid) == 1
 
 
 async def test_delivery_retry_after_send_failure(shop: Shop) -> None:
@@ -149,11 +142,9 @@ async def test_delivery_retry_after_send_failure(shop: Shop) -> None:
     r1 = await shop.payments.process_payment_link(oid, mock_link(500, "RETRY"))
     content1 = r1.delivered_content
     assert content1 is not None
-    # Simulate Telegram send failure: do NOT confirm. Order stays DELIVERING.
     assert await _status(shop, oid) == OrderStatus.DELIVERING.value
-    # Retry (admin /retry_delivery or startup recovery).
     r2 = await shop.payments.deliver_order(oid)
-    assert r2.delivered_content == content1  # same reserved item
+    assert r2.delivered_content == content1
     await shop.payments.confirm_delivered(oid)
     assert await _status(shop, oid) == OrderStatus.DELIVERED.value
 
@@ -163,8 +154,6 @@ async def test_product_notes_persist_for_delivery(shop: Shop) -> None:
     await shop.products.set_notes(pid, "初回起動時にライセンス認証してください")
     view = next(p for p in await shop.products.list_all() if p.id == pid)
     assert view.notes == "初回起動時にライセンス認証してください"
-    # A delivered order carries the content; the note is attached at send time
-    # from the product record (see bot/handlers/payment.deliver_to_buyer).
     oid = await _new_order(shop, 1, pid)
     result = await shop.payments.process_payment_link(oid, mock_link(500, "NOTE"))
     assert result.delivered_content is not None
@@ -175,7 +164,6 @@ async def test_product_notes_persist_for_delivery(shop: Shop) -> None:
 async def test_startup_recovery_redelivers_paid(shop: Shop) -> None:
     pid = await make_product_with_stock(shop, price=500, stock=1)
     oid = await _new_order(shop, 1, pid)
-    # Put order into PAID directly (money in, never delivered).
     await shop.payments._set_status(oid, OrderStatus.PAID)
     result = await shop.payments.deliver_order(oid)
     assert result.delivered_content is not None

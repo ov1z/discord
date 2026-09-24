@@ -45,7 +45,6 @@ async def test_timeout_on_accept_is_network_error() -> None:
     p.timeout_on_accept.add("T3")
     with pytest.raises(PayPayNetworkError):
         await p.accept_payment(mock_link(500, "T3"))
-    # Not marked received -> still pending.
     info = await p.inspect_payment(mock_link(500, "T3"))
     assert info.status == LinkStatus.PENDING
 
@@ -55,6 +54,5 @@ async def test_timeout_after_accept_marks_received() -> None:
     p.timeout_after_accept.add("T4")
     with pytest.raises(PayPayNetworkError):
         await p.accept_payment(mock_link(500, "T4"))
-    # Money moved despite the error -> status is SUCCESS.
     info = await p.inspect_payment(mock_link(500, "T4"))
     assert info.status == LinkStatus.SUCCESS

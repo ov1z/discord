@@ -18,29 +18,40 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Telegram
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     admin_telegram_id: int = Field(default=0, alias="ADMIN_TELEGRAM_ID")
 
-    # Database
     database_url: str = Field(
         default="sqlite+aiosqlite:///shop.db", alias="DATABASE_URL"
     )
 
-    # Security
     session_encryption_key: str = Field(default="", alias="SESSION_ENCRYPTION_KEY")
     paypay_session_path: str = Field(
         default="paypay_session.enc", alias="PAYPAY_SESSION_PATH"
     )
 
-    # Payment provider: "mock" | "paypay"
     payment_provider: str = Field(default="mock", alias="PAYMENT_PROVIDER")
+    payment_flow: str = Field(default="link", alias="PAYMENT_FLOW")
 
-    # Behaviour
+    support_contact: str = Field(default="@anonxdev", alias="SUPPORT_CONTACT")
+
     order_ttl_seconds: int = Field(default=600, alias="ORDER_TTL_SECONDS")
-    # 一次保留が出たとき、購入者に解除を促してから再確認するまでの秒数
     hold_recheck_seconds: int = Field(default=60, alias="HOLD_RECHECK_SECONDS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    @property
+    def support_url(self) -> str | None:
+        """t.me link for the support button, or None if not configured."""
+        handle = self.support_contact.strip().lstrip("@")
+        if not handle:
+            return None
+        if handle.startswith("http://") or handle.startswith("https://"):
+            return handle
+        return f"https://t.me/{handle}"
+
+    @property
+    def uses_payment_requests(self) -> bool:
+        return self.payment_flow.strip().lower() == "request"
 
     @property
     def is_sqlite(self) -> bool:

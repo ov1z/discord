@@ -30,7 +30,12 @@ from database.repository import (
     PaymentRepository,
 )
 from payments.base import AcceptOutcome, PaymentProvider
-from paypay.exceptions import PayPayError, PayPayTemporaryHold, PaymentAmountMismatch
+from paypay.exceptions import (
+    PayPayError,
+    PayPayNetworkError,
+    PayPayTemporaryHold,
+    PaymentAmountMismatch,
+)
 from paypay.models import LinkStatus, PaymentInfo
 from security.redaction import redact
 
@@ -39,7 +44,7 @@ logger = logging.getLogger("services.payment")
 
 class PurchaseOutcome(str, enum.Enum):
     DELIVERED = "DELIVERED"
-    PAID_NOT_DELIVERED = "PAID_NOT_DELIVERED"  # money in, delivery pending/failed
+    PAID_NOT_DELIVERED = "PAID_NOT_DELIVERED"
     AMOUNT_MISMATCH = "AMOUNT_MISMATCH"
     INVALID_LINK = "INVALID_LINK"
     LINK_ALREADY_USED = "LINK_ALREADY_USED"
@@ -49,8 +54,11 @@ class PurchaseOutcome(str, enum.Enum):
     OUT_OF_STOCK = "OUT_OF_STOCK"
     PROVIDER_NOT_READY = "PROVIDER_NOT_READY"
     PAYMENT_UNKNOWN = "PAYMENT_UNKNOWN"
-    PAYMENT_HELD = "PAYMENT_HELD"  # PayPay temporary hold; money not settled
+    PAYMENT_HELD = "PAYMENT_HELD"
     FAILED = "FAILED"
+    TRANSACTION_NOT_FOUND = "TRANSACTION_NOT_FOUND"
+    TRANSACTION_NOT_INCOMING = "TRANSACTION_NOT_INCOMING"
+    TRANSACTION_NOT_COMPLETED = "TRANSACTION_NOT_COMPLETED"
 
 
 @dataclass(slots=True)
@@ -59,9 +67,10 @@ class PurchaseResult:
     order_code: str
     expected_amount: int
     actual_amount: int | None = None
-    delivered_content: str | None = None       # first item (kept for compat)
-    delivered_contents: list[str] | None = None  # all items for the quantity
+    delivered_content: str | None = None
+    delivered_contents: list[str] | None = None
     payment_id: str | None = None
+    provider_message: str | None = None
 
 
 class PaymentService:
@@ -90,7 +99,6 @@ class PaymentService:
             return await self._process(order_id, url)
 
     async def _process(self, order_id: int, url: str) -> PurchaseResult:
-        # ---- load order & guards ----
         async with self._sm() as session:
             order = await OrderRepository(session).get(order_id)
             if order is None:
@@ -101,7 +109,6 @@ class PaymentService:
             expires_at = self._aware(order.expires_at)
 
         if status != OrderStatus.WAITING_PAYMENT.value:
-            # Already progressed (double submit). Report current state safely.
             if status in (OrderStatus.DELIVERED.value,):
                 return PurchaseResult(
                     PurchaseOutcome.DELIVERED, order_code, expected
@@ -127,19 +134,16 @@ class PaymentService:
                 PurchaseOutcome.PROVIDER_NOT_READY, order_code, expected
             )
 
-        # ---- inspect link ----
         try:
             info = await self._provider.inspect_payment(url)
         except PayPayError:
             return PurchaseResult(PurchaseOutcome.INVALID_LINK, order_code, expected)
 
-        # ---- double-use guard (pre-check; DB UNIQUE is the hard guarantee) ----
         if await self._link_already_used(info.link_id, order_id):
             return PurchaseResult(
                 PurchaseOutcome.LINK_ALREADY_USED, order_code, expected
             )
 
-        # ---- amount match (exact) ----
         if info.amount != expected:
             return PurchaseResult(
                 PurchaseOutcome.AMOUNT_MISMATCH,
@@ -153,13 +157,11 @@ class PaymentService:
                 PurchaseOutcome.NOT_ACCEPTABLE, order_code, expected
             )
 
-        # ---- claim the link on this order (enforces uniqueness) ----
         if not await self._claim_link(order_id, url, info):
             return PurchaseResult(
                 PurchaseOutcome.LINK_ALREADY_USED, order_code, expected
             )
 
-        # ---- accept ----
         await self._set_status(order_id, OrderStatus.ACCEPTING_PAYMENT)
         try:
             result = await self._provider.accept_payment(url, link_info=info)
@@ -168,13 +170,11 @@ class PaymentService:
                 PurchaseOutcome.AMOUNT_MISMATCH, order_code, expected, info.amount
             )
         except PayPayTemporaryHold:
-            # Money not finally settled -> never deliver; leave for manual check.
             await self._mark_unknown(order_id, info)
             return PurchaseResult(
                 PurchaseOutcome.PAYMENT_HELD, order_code, expected
             )
         except PayPayError:
-            # Truly unknown whether it went through -> UNKNOWN, not FAILED.
             await self._mark_unknown(order_id, info)
             return PurchaseResult(
                 PurchaseOutcome.PAYMENT_UNKNOWN, order_code, expected
@@ -183,7 +183,8 @@ class PaymentService:
         if result.outcome == AcceptOutcome.HELD:
             await self._mark_unknown(order_id, info, result.raw)
             return PurchaseResult(
-                PurchaseOutcome.PAYMENT_HELD, order_code, expected
+                PurchaseOutcome.PAYMENT_HELD, order_code, expected,
+                provider_message=result.message,
             )
         if result.outcome == AcceptOutcome.UNKNOWN:
             await self._mark_unknown(order_id, info, result.raw)
@@ -193,9 +194,11 @@ class PaymentService:
         if result.outcome == AcceptOutcome.FAILED:
             await self._set_status(order_id, OrderStatus.FAILED)
             await self._update_payment(order_id, PaymentStatus.FAILED, info, result.raw)
-            return PurchaseResult(PurchaseOutcome.FAILED, order_code, expected)
+            return PurchaseResult(
+                PurchaseOutcome.FAILED, order_code, expected,
+                provider_message=result.message,
+            )
 
-        # ACCEPTED or ALREADY -> confirm authoritative state.
         confirmed = await self._confirm_received(url)
         if confirmed is None:
             await self._mark_unknown(order_id, info, result.raw)
@@ -208,7 +211,6 @@ class PaymentService:
                 PurchaseOutcome.PAYMENT_UNKNOWN, order_code, expected
             )
 
-        # Confirmed received -> PAID.
         payment_id = result.payment_id or info.payment_id
         await self._set_status(
             order_id,
@@ -220,10 +222,139 @@ class PaymentService:
             order_id, PaymentStatus.COMPLETED, info, result.raw, external_id=payment_id
         )
 
-        # ---- deliver ----
         return await self._deliver(order_id, order_code, expected, payment_id)
 
-    # ------------------------------------------------------- re-verify (admin)
+    async def confirm_by_transaction(
+        self, order_id: int, transaction_id: str, history_limit: int = 10
+    ) -> PurchaseResult:
+        """Settle an order against a transaction in OUR OWN payment history.
+
+        The buyer supplies only the transaction number; everything that decides
+        whether goods are handed over is read back from PayPay by us.
+        """
+        lock = self._locks[order_id]
+        async with lock:
+            return await self._confirm_by_transaction(
+                order_id, transaction_id, history_limit
+            )
+
+    async def _confirm_by_transaction(
+        self, order_id: int, transaction_id: str, history_limit: int
+    ) -> PurchaseResult:
+        transaction_id = (transaction_id or "").strip()
+        async with self._sm() as session:
+            order = await OrderRepository(session).get(order_id)
+            if order is None:
+                raise ValueError(f"order {order_id} not found")
+            order_code = order.order_code
+            expected = order.price
+            status = order.status
+            expires_at = self._aware(order.expires_at)
+
+        if status != OrderStatus.WAITING_PAYMENT.value:
+            if status == OrderStatus.DELIVERED.value:
+                return PurchaseResult(PurchaseOutcome.DELIVERED, order_code, expected)
+            if status in (OrderStatus.PAID.value, OrderStatus.DELIVERING.value):
+                return PurchaseResult(
+                    PurchaseOutcome.PAID_NOT_DELIVERED, order_code, expected
+                )
+            return PurchaseResult(
+                PurchaseOutcome.ORDER_NOT_WAITING, order_code, expected
+            )
+
+        if expires_at and datetime.now(timezone.utc) > expires_at:
+            await self._set_status(order_id, OrderStatus.EXPIRED)
+            return PurchaseResult(PurchaseOutcome.ORDER_EXPIRED, order_code, expected)
+
+        if not await self._provider.is_ready():
+            return PurchaseResult(
+                PurchaseOutcome.PROVIDER_NOT_READY, order_code, expected
+            )
+
+        if await self._transaction_already_used(transaction_id, order_id):
+            return PurchaseResult(
+                PurchaseOutcome.LINK_ALREADY_USED, order_code, expected
+            )
+
+        try:
+            history = await self._provider.recent_incoming(limit=history_limit)
+        except PayPayNetworkError:
+            return PurchaseResult(
+                PurchaseOutcome.PAYMENT_UNKNOWN, order_code, expected
+            )
+        except PayPayError:
+            return PurchaseResult(PurchaseOutcome.FAILED, order_code, expected)
+
+        match = next(
+            (t for t in history if t.transaction_id == transaction_id), None
+        )
+        if match is None:
+            return PurchaseResult(
+                PurchaseOutcome.TRANSACTION_NOT_FOUND, order_code, expected
+            )
+        if not match.incoming:
+            return PurchaseResult(
+                PurchaseOutcome.TRANSACTION_NOT_INCOMING, order_code, expected
+            )
+        if not match.completed:
+            return PurchaseResult(
+                PurchaseOutcome.TRANSACTION_NOT_COMPLETED, order_code, expected
+            )
+        if match.amount != expected:
+            return PurchaseResult(
+                PurchaseOutcome.AMOUNT_MISMATCH, order_code, expected,
+                actual_amount=match.amount,
+            )
+
+        if not await self._claim_transaction(order_id, match):
+            return PurchaseResult(
+                PurchaseOutcome.LINK_ALREADY_USED, order_code, expected
+            )
+
+        await self._set_status(
+            order_id, OrderStatus.PAID, external_payment_id=match.transaction_id
+        )
+        return await self._deliver(
+            order_id, order_code, expected, match.transaction_id
+        )
+
+    async def _transaction_already_used(
+        self, transaction_id: str, this_order_id: int
+    ) -> bool:
+        if not transaction_id:
+            return False
+        async with self._sm() as session:
+            pay = await PaymentRepository(session).find_by_external_id(
+                self._provider.name, transaction_id
+            )
+            return pay is not None and pay.order_id != this_order_id
+
+    async def _claim_transaction(self, order_id: int, tx) -> bool:
+        """Record the transaction against this order. UNIQUE-guarded."""
+        async with self._sm() as session:
+            prepo = PaymentRepository(session)
+            existing = await prepo.get_for_order(order_id)
+            if existing is None:
+                await prepo.create(
+                    order_id=order_id,
+                    provider=self._provider.name,
+                    amount=tx.amount,
+                    paypay_link_id=None,
+                    external_payment_id=tx.transaction_id,
+                    status=PaymentStatus.COMPLETED.value,
+                    raw_response=json.dumps(redact(tx.raw), ensure_ascii=False),
+                )
+            else:
+                existing.external_payment_id = tx.transaction_id
+                existing.amount = tx.amount
+                existing.status = PaymentStatus.COMPLETED.value
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                return False
+            return True
+
     async def reverify_and_settle(
         self, order_id: int, retry_accept: bool = False
     ) -> PurchaseResult:
@@ -287,7 +418,6 @@ class PaymentService:
                         info = await self._provider.get_payment_status(url)
 
             if info.status != LinkStatus.SUCCESS:
-                # Still pending/held -> not settled yet.
                 return PurchaseResult(
                     PurchaseOutcome.PAYMENT_HELD, order_code, expected
                 )
@@ -303,7 +433,6 @@ class PaymentService:
             )
             return await self._deliver(order_id, order_code, expected, payment_id)
 
-    # --------------------------------------------------------------- delivery
     async def deliver_order(self, order_id: int) -> PurchaseResult:
         """Public entry to (re)deliver a PAID/DELIVERING order."""
         lock = self._locks[order_id]
@@ -345,14 +474,12 @@ class PaymentService:
                     PurchaseOutcome.PAID_NOT_DELIVERED, order_code, expected
                 )
 
-        # Reserve stock atomically (idempotent per order).
         async with self._sm() as session:
             irepo = InventoryRepository(session)
             order = await OrderRepository(session).get(order_id)
             assert order is not None
             items = await irepo.reserve_many(order.product_id, order_id, quantity)
             if items is None:
-                # PAID but not enough stock: keep money, let admin re-deliver.
                 order.status = OrderStatus.DELIVERING.value
                 await session.commit()
                 return PurchaseResult(
@@ -363,10 +490,8 @@ class PaymentService:
             contents = [it.content for it in items]
             await session.commit()
 
-        # Mark delivered (the actual Telegram send is done by the caller; if it
-        # fails, the order stays DELIVERING and stock stays RESERVED for retry).
         return PurchaseResult(
-            PurchaseOutcome.PAID_NOT_DELIVERED,  # provisional until caller confirms
+            PurchaseOutcome.PAID_NOT_DELIVERED,
             order_code,
             expected,
             delivered_content=contents[0] if contents else None,
@@ -388,7 +513,6 @@ class PaymentService:
             order.delivered_at = now
             await session.commit()
 
-    # --------------------------------------------------------------- helpers
     async def _confirm_received(self, url: str) -> bool | None:
         """True=received, False=not received, None=undetermined."""
         try:

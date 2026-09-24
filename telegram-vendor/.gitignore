@@ -5,6 +5,8 @@ paypay_session*
 *.db
 *.sqlite
 *.sqlite3
+*.db.bak*
+shop.db.bak-*
 
 # python
 __pycache__/

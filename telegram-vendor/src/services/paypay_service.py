@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from paypay.client import PayPayClient
 from paypay.exceptions import PayPayError, PayPaySessionExpired
 from paypay.models import LoginResult, LoginStatus, PayPaySession
-from paypay.session_store import PayPaySessionStore
+from paypay.session_store import DeviceStore, PayPaySessionStore
 
 logger = logging.getLogger("services.paypay")
 
@@ -36,10 +36,14 @@ class PayPayStatusView:
 
 class PayPayService:
     def __init__(
-        self, client: PayPayClient, store: PayPaySessionStore
+        self,
+        client: PayPayClient,
+        store: PayPaySessionStore,
+        devices: DeviceStore | None = None,
     ) -> None:
         self._client = client
         self._store = store
+        self._devices = devices
 
     @property
     def client(self) -> PayPayClient:
@@ -48,7 +52,6 @@ class PayPayService:
     def is_authenticated(self) -> bool:
         return self._client.is_authenticated()
 
-    # ---------------------------------------------------------------- startup
     async def restore_session(self) -> AuthState:
         """Load a saved session at boot; refresh if expired; verify liveness."""
         session = await self._store.load()
@@ -56,7 +59,6 @@ class PayPayService:
             return AuthState.UNAUTHENTICATED
         self._client.set_session(session)
 
-        # Refresh if we believe the token is expired and a refresh token exists.
         exp = session.token_expires_at
         if exp and exp.tzinfo is None:
             exp = exp.replace(tzinfo=timezone.utc)
@@ -73,15 +75,28 @@ class PayPayService:
                 return AuthState.UNAUTHENTICATED
         return AuthState.AUTHENTICATED
 
-    # ----------------------------------------------------------------- login
-    async def begin_login(self, phone: str, password: str) -> LoginResult:
-        """Start a login. Credentials are used only for this call."""
-        result = await self._client.begin_login(phone, password)
-        # Never log phone/password/result raw.
+    async def begin_login(
+        self, phone: str, password: str, on_progress=None
+    ) -> LoginResult:
+        """Start a login. Credentials are used only for this call.
+
+        ``on_progress`` is an async callable receiving a ``paypay.auth.STAGE_*``
+        id as each step begins, so the caller can show progress.
+        """
+        device_uuid = client_uuid = None
+        if self._devices is not None:
+            device_uuid, client_uuid = await self._devices.get_or_create(phone)
+        result = await self._client.begin_login(
+            phone,
+            password,
+            device_uuid=device_uuid,
+            client_uuid=client_uuid,
+            on_progress=on_progress,
+        )
         return result
 
-    async def submit_otp(self, otp: str) -> LoginResult:
-        result = await self._client.submit_otp(otp)
+    async def submit_otp(self, otp: str, on_progress=None) -> LoginResult:
+        result = await self._client.submit_otp(otp, on_progress=on_progress)
         if result.status == LoginStatus.SUCCESS:
             session = self._client.get_session()
             if session is not None:
@@ -101,12 +116,10 @@ class PayPayService:
         await self._store.save(session)
         return session
 
-    # ---------------------------------------------------------------- logout
     async def logout(self) -> None:
         self._client.set_session(None)
         await self._store.clear()
 
-    # ---------------------------------------------------------------- status
     async def status(self, provider_ready: bool) -> PayPayStatusView:
         session = self._client.get_session()
         return PayPayStatusView(

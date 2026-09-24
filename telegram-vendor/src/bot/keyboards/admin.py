@@ -33,8 +33,10 @@ def products_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [_btn("➕ 商品追加", "ap:add_product")],
-            [_btn("📦 在庫追加", "ap:restock"), _btn("📝 注意事項設定", "ap:note")],
-            [_btn("💹 価格設定", "ap:tiers"), _btn("🗑 商品削除", "ap:del")],
+            [_btn("📄 商品説明", "ap:desc"), _btn("📝 注意事項設定", "ap:note")],
+            [_btn("📦 在庫追加", "ap:restock")],
+            [_btn("💹 価格設定", "ap:tiers"), _btn("🔢 まとめ買いボタン", "ap:bulk")],
+            [_btn("🗑 商品削除", "ap:del")],
             back_button(),
         ]
     )
@@ -53,6 +55,16 @@ def product_picker_keyboard(
 ) -> InlineKeyboardMarkup:
     rows = _product_rows(products, action)
     rows.append(back_button(back))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def bulk_buttons_keyboard(products: list[ProductView]) -> InlineKeyboardMarkup:
+    """One row per product; tapping flips its multi-quantity buttons on/off."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for p in products:
+        mark = "✅ 表示" if p.show_bulk_buttons else "⬜️ 非表示"
+        rows.append([_btn(f"{mark} | {p.name}", f"ap:bulkp:{p.id}")])
+    rows.append(back_button("ap:products"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -88,3 +100,14 @@ def paypay_keyboard(authenticated: bool) -> InlineKeyboardMarkup:
 
 def cancel_input_keyboard(target: str = "ap:home") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_btn("キャンセル", target)]])
+
+
+def text_input_keyboard(
+    clear_callback: str, target: str = "ap:products"
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("🗑 空にする", clear_callback)],
+            [_btn("キャンセル", target)],
+        ]
+    )

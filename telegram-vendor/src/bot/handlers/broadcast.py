@@ -24,8 +24,7 @@ logger = logging.getLogger("bot.broadcast")
 
 router = Router(name="broadcast")
 
-# Telegram allows ~30 msg/s to different users; stay well under it.
-_SEND_INTERVAL = 0.05  # 20/s
+_SEND_INTERVAL = 0.05
 
 
 @dataclass(slots=True)
@@ -44,7 +43,7 @@ async def broadcast(bot: Bot, services: Container, text: str) -> BroadcastResult
         try:
             await bot.send_message(uid, text)
             sent += 1
-        except Exception:  # noqa: BLE001 - blocked/deactivated/etc.
+        except Exception:
             failed += 1
         await asyncio.sleep(_SEND_INTERVAL)
     logger.info("broadcast done: %d sent / %d failed", sent, failed)
@@ -63,7 +62,6 @@ async def cmd_broadcast(
         return
     text = (command.args or "").strip()
     if not text:
-        # No inline text -> ask for it via the FSM.
         await state.set_state(AdminStates.BROADCAST)
         count = await services.users.count()
         await message.answer(

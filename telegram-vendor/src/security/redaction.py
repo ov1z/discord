@@ -8,7 +8,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Keys whose values must always be masked (case-insensitive, substring match).
 SENSITIVE_KEYS: tuple[str, ...] = (
     "authorization",
     "access_token",
@@ -38,7 +37,6 @@ SENSITIVE_KEYS: tuple[str, ...] = (
 
 MASK = "***REDACTED***"
 
-# Bearer tokens / long opaque strings inside free text.
 _BEARER_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]+", re.IGNORECASE)
 _JP_PHONE_RE = re.compile(r"\b0\d{1,4}-?\d{1,4}-?\d{3,4}\b")
 

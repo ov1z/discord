@@ -22,6 +22,7 @@ class ProductView:
     available_stock: int
     notes: str | None = None
     price_tiers: str | None = None
+    show_bulk_buttons: bool = True
 
     @property
     def tiers(self) -> list["pricing.Tier"]:
@@ -52,6 +53,15 @@ class ProductService:
             await session.commit()
             return updated is not None
 
+    async def set_description(self, product_id: int, description: str) -> bool:
+        """Set the blurb shown on the product screen before buying."""
+        async with self._sm() as session:
+            updated = await ProductRepository(session).update_fields(
+                product_id, description=description
+            )
+            await session.commit()
+            return updated is not None
+
     async def set_notes(self, product_id: int, notes: str) -> bool:
         """Set the per-product note shown to buyers after delivery."""
         async with self._sm() as session:
@@ -62,13 +72,34 @@ class ProductService:
             return updated is not None
 
     async def set_tiers(self, product_id: int, tiers_json: str) -> bool:
-        """Set the bulk-discount price tiers (stored JSON)."""
+        """Set the per-quantity price table (stored JSON)."""
         async with self._sm() as session:
             updated = await ProductRepository(session).update_fields(
                 product_id, price_tiers=tiers_json
             )
             await session.commit()
             return updated is not None
+
+    async def set_bulk_buttons(self, product_id: int, show: bool) -> bool:
+        """Show or hide the multi-quantity buttons on the product screen."""
+        async with self._sm() as session:
+            updated = await ProductRepository(session).update_fields(
+                product_id, show_bulk_buttons=show
+            )
+            await session.commit()
+            return updated is not None
+
+    async def toggle_bulk_buttons(self, product_id: int) -> bool | None:
+        """Flip the multi-quantity buttons. Returns the new value, or None."""
+        async with self._sm() as session:
+            repo = ProductRepository(session)
+            product = await repo.get(product_id)
+            if product is None:
+                return None
+            new_value = not bool(product.show_bulk_buttons)
+            await repo.update_fields(product_id, show_bulk_buttons=new_value)
+            await session.commit()
+            return new_value
 
     async def get_view(self, product_id: int) -> ProductView | None:
         async with self._sm() as session:
@@ -78,7 +109,7 @@ class ProductService:
             stock = await InventoryRepository(session).count_available(p.id)
             return ProductView(
                 p.id, p.name, p.price, p.description, p.active, stock,
-                p.notes, p.price_tiers,
+                p.notes, p.price_tiers, bool(p.show_bulk_buttons),
             )
 
     async def delete(self, product_id: int) -> bool:
@@ -99,7 +130,10 @@ class ProductService:
             for p in await prepo.list_active():
                 stock = await irepo.count_available(p.id)
                 views.append(
-                    ProductView(p.id, p.name, p.price, p.description, p.active, stock, p.notes, p.price_tiers)
+                    ProductView(
+                        p.id, p.name, p.price, p.description, p.active, stock,
+                        p.notes, p.price_tiers, bool(p.show_bulk_buttons),
+                    )
                 )
             return views
 
@@ -111,6 +145,9 @@ class ProductService:
             for p in await prepo.list_all():
                 stock = await irepo.count_available(p.id)
                 views.append(
-                    ProductView(p.id, p.name, p.price, p.description, p.active, stock, p.notes, p.price_tiers)
+                    ProductView(
+                        p.id, p.name, p.price, p.description, p.active, stock,
+                        p.notes, p.price_tiers, bool(p.show_bulk_buttons),
+                    )
                 )
             return views

@@ -21,7 +21,6 @@ _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 def _build_engine(settings: Settings) -> AsyncEngine:
     kwargs: dict = {"echo": False, "future": True}
     if settings.is_sqlite:
-        # Allow use across the single-threaded asyncio loop.
         kwargs["connect_args"] = {"check_same_thread": False}
     return create_async_engine(settings.database_url, **kwargs)
 
@@ -66,7 +65,7 @@ def _ensure_new_columns(sync_conn) -> None:
     def cols(table: str) -> set[str]:
         try:
             return {c["name"] for c in inspector.get_columns(table)}
-        except Exception:  # table missing -> create_all handled it
+        except Exception:
             return set()
 
     pcols = cols("products")
@@ -74,6 +73,13 @@ def _ensure_new_columns(sync_conn) -> None:
         sync_conn.execute(text("ALTER TABLE products ADD COLUMN notes TEXT"))
     if pcols and "price_tiers" not in pcols:
         sync_conn.execute(text("ALTER TABLE products ADD COLUMN price_tiers TEXT"))
+    if pcols and "show_bulk_buttons" not in pcols:
+        sync_conn.execute(
+            text(
+                "ALTER TABLE products ADD COLUMN show_bulk_buttons "
+                "BOOLEAN NOT NULL DEFAULT 1"
+            )
+        )
 
     ocols = cols("orders")
     if ocols and "quantity" not in ocols:

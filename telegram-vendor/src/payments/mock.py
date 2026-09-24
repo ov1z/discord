@@ -17,23 +17,24 @@ from paypay.exceptions import (
     PayPayNetworkError,
     PayPayTemporaryHold,
 )
-from paypay.models import LinkStatus, PaymentInfo
+from paypay.models import LinkStatus, PaymentInfo, RequestLink, Transaction
 
 _LINK_RE = re.compile(r"https?://example\.local/pay/(\d+)/([A-Za-z0-9_-]+)")
 
 
 class MockPaymentProvider(PaymentProvider):
     name = "mock"
+    supports_requests = True
 
     def __init__(self) -> None:
-        # link_id -> state
         self._received: set[str] = set()
-        # test hooks
         self.fail_inspect: set[str] = set()
         self.timeout_on_accept: set[str] = set()
-        self.timeout_after_accept: set[str] = set()  # accept happens, status errors
-        self.hold_on_accept: set[str] = set()  # PayPay temporary hold (42007013)
+        self.timeout_after_accept: set[str] = set()
+        self.hold_on_accept: set[str] = set()
         self.ready: bool = True
+        self._request_seq = 0
+        self._history: list[Transaction] = []
 
     def _parse(self, url: str) -> tuple[int, str]:
         m = _LINK_RE.match(url.strip())
@@ -43,6 +44,41 @@ class MockPaymentProvider(PaymentProvider):
 
     async def is_ready(self) -> bool:
         return self.ready
+
+    def looks_like_link(self, text: str) -> bool:
+        return bool(_LINK_RE.search(text or ""))
+
+    async def create_request(self, amount: int) -> RequestLink:
+        self._request_seq += 1
+        code = f"REQ{self._request_seq:04d}"
+        return RequestLink(
+            link=f"https://example.local/request/{amount}/{code}",
+            code=code,
+            amount=amount,
+            session_id=code,
+        )
+
+    async def recent_incoming(self, limit: int = 10) -> list[Transaction]:
+        return list(self._history[:limit])
+
+    def add_incoming(
+        self,
+        transaction_id: str,
+        amount: int,
+        *,
+        incoming: bool = True,
+        status: str = "COMPLETED",
+    ) -> Transaction:
+        """Test hook: put a transaction at the top of the history."""
+        tx = Transaction(
+            transaction_id=transaction_id,
+            amount=amount,
+            incoming=incoming,
+            status=status,
+            order_type="P2P_CODE_RECEPTION" if incoming else "P2PSEND",
+        )
+        self._history.insert(0, tx)
+        return tx
 
     async def inspect_payment(self, url: str) -> PaymentInfo:
         amount, link_id = self._parse(url)
@@ -67,21 +103,17 @@ class MockPaymentProvider(PaymentProvider):
         amount, link_id = self._parse(url)
 
         if link_id in self.timeout_on_accept:
-            # We do not know whether PayPay processed it -> UNKNOWN.
             raise PayPayNetworkError("timeout during accept (test hook)")
 
         if link_id in self.hold_on_accept:
-            # Temporary hold: money not finally settled -> must not deliver.
             raise PayPayTemporaryHold("temporary hold (test hook)")
 
         if link_id in self._received:
             raise PayPayAlreadyAccepted("already received")
 
-        # Perform the receive.
         self._received.add(link_id)
 
         if link_id in self.timeout_after_accept:
-            # Money moved, but confirming the final state failed.
             raise PayPayNetworkError("timeout after accept (test hook)")
 
         return AcceptResult(
@@ -93,6 +125,5 @@ class MockPaymentProvider(PaymentProvider):
     async def get_payment_status(self, url: str) -> PaymentInfo:
         return await self.inspect_payment(url)
 
-    # test helper
     def mark_received(self, link_id: str) -> None:
         self._received.add(link_id)

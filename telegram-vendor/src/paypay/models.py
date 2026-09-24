@@ -27,9 +27,7 @@ class LinkStatus(str, enum.Enum):
 @dataclass(slots=True)
 class LoginResult:
     status: LoginStatus
-    # Human-safe message (never contains secrets).
     message: str = ""
-    # Opaque context needed to continue an OTP/OTL flow (no credentials).
     otp_reference: str | None = None
 
 
@@ -73,6 +71,64 @@ class PayPaySession:
 
 
 @dataclass(slots=True)
+class RequestLink:
+    """A payment request (P2P code) the shop issues for an exact amount."""
+
+    link: str
+    code: str
+    amount: int
+    session_id: str | None = None
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class Transaction:
+    """One row of the account's payment history."""
+
+    transaction_id: str
+    amount: int
+    incoming: bool
+    status: str
+    order_type: str = ""
+    description: str = ""
+    created_at: datetime | None = None
+    raw: dict = field(default_factory=dict)
+
+    @property
+    def completed(self) -> bool:
+        return self.status.upper() in {"COMPLETED", "SUCCESS", "RECEIVED"}
+
+
+@dataclass(slots=True)
+class RequestLink:
+    """A payment request (P2P code) the shop issues for an exact amount."""
+
+    link: str
+    code: str
+    amount: int
+    session_id: str | None = None
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class Transaction:
+    """One row of the account's payment history."""
+
+    transaction_id: str
+    amount: int
+    incoming: bool
+    status: str
+    order_type: str = ""
+    description: str = ""
+    created_at: datetime | None = None
+    raw: dict = field(default_factory=dict)
+
+    @property
+    def completed(self) -> bool:
+        return self.status.upper() in {"COMPLETED", "SUCCESS", "RECEIVED"}
+
+
+@dataclass(slots=True)
 class PaymentInfo:
     """Normalized view of a P2P send-money link."""
 
@@ -80,12 +136,11 @@ class PaymentInfo:
     amount: int
     status: LinkStatus
     can_accept: bool
-    payment_id: str | None = None  # order_id inside PayPay
+    payment_id: str | None = None
     sender_name: str | None = None
     sender_external_id: str | None = None
     has_password: bool = False
     expires_at: datetime | None = None
-    # Needed to build the accept request (from getP2PLinkInfo).
     chat_room_id: str | None = None
     message_id: str | None = None
     request_id: str | None = None

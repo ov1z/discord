@@ -9,18 +9,17 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-# Make src/ importable.
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from database.models import Base  # noqa: E402
-from payments.mock import MockPaymentProvider  # noqa: E402
-from services.inventory_service import InventoryService  # noqa: E402
-from services.order_service import OrderService  # noqa: E402
-from services.payment_service import PaymentService  # noqa: E402
-from services.product_service import ProductService  # noqa: E402
-from services.user_service import UserService  # noqa: E402
+from database.models import Base
+from payments.mock import MockPaymentProvider
+from services.inventory_service import InventoryService
+from services.order_service import OrderService
+from services.payment_service import PaymentService
+from services.product_service import ProductService
+from services.user_service import UserService
 
 
 @dataclass

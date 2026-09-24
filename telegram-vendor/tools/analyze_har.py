@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Analyze a HAR capture to discover PayPay API request/response shapes.
 
 Usage:
@@ -18,7 +17,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from security.redaction import redact  # noqa: E402
+from security.redaction import redact
 
 
 def _json_keys(text: str | None) -> object:

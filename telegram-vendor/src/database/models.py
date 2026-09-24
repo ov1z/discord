@@ -29,9 +29,6 @@ class Base(DeclarativeBase):
     pass
 
 
-# --------------------------------------------------------------------------- #
-# Enums (stored as strings)
-# --------------------------------------------------------------------------- #
 class OrderStatus(str, enum.Enum):
     WAITING_PAYMENT = "WAITING_PAYMENT"
     CHECKING_PAYMENT = "CHECKING_PAYMENT"
@@ -61,9 +58,6 @@ class PaymentStatus(str, enum.Enum):
     UNKNOWN = "UNKNOWN"
 
 
-# --------------------------------------------------------------------------- #
-# Tables
-# --------------------------------------------------------------------------- #
 class User(Base):
     __tablename__ = "users"
 
@@ -84,13 +78,13 @@ class Product(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    price: Mapped[int] = mapped_column(Integer, nullable=False)  # JPY, integer yen
+    price: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Per-product note shown to the buyer AFTER the item is delivered
-    # (e.g. usage instructions / warnings).
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # JSON list of bulk-discount tiers [{"min":1,"price":1800},...]; NULL = flat.
     price_tiers: Mapped[str | None] = mapped_column(Text, nullable=True)
+    show_bulk_buttons: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, server_default="1"
+    )
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -107,7 +101,7 @@ class Inventory(Base):
     product_id: Mapped[int] = mapped_column(
         ForeignKey("products.id"), index=True, nullable=False
     )
-    content: Mapped[str] = mapped_column(Text, nullable=False)  # the digital good
+    content: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
         String(20), default=InventoryStatus.AVAILABLE.value, index=True, nullable=False
     )
@@ -135,13 +129,11 @@ class Order(Base):
     )
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     unit_price: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    # price = quantity * unit_price (the exact total the buyer must pay).
     price: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(
         String(24), default=OrderStatus.WAITING_PAYMENT.value, index=True, nullable=False
     )
     paypay_link: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # UNIQUE across orders -> a link can only ever back one order.
     paypay_link_id: Mapped[str | None] = mapped_column(
         String(255), unique=True, nullable=True
     )
@@ -163,7 +155,6 @@ class Order(Base):
 class Payment(Base):
     __tablename__ = "payments"
     __table_args__ = (
-        # Same PayPay link / payment id may never be recorded twice.
         UniqueConstraint("provider", "paypay_link_id", name="uq_payment_link"),
         UniqueConstraint(
             "provider", "external_payment_id", name="uq_payment_external"
@@ -185,5 +176,4 @@ class Payment(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
-    # Redacted JSON string (never store tokens/cookies/PII).
     raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -24,20 +24,25 @@ def shop_list_keyboard(products: list[ProductView]) -> InlineKeyboardMarkup:
 
 
 def product_detail_keyboard(view: ProductView) -> InlineKeyboardMarkup:
-    """Quantity buttons (per tier) + custom quantity + back."""
+    """Quantity buttons (one per priced quantity) + custom quantity + back.
+
+    With ``show_bulk_buttons`` off only the 1-unit button is listed; buyers can
+    still pick any quantity through the free quantity input.
+    """
     rows: list[list[InlineKeyboardButton]] = []
     if view.available_stock <= 0:
         rows.append([_btn("🔔 入荷待ち", "noop")])
     else:
         tiers = view.tiers
-        for qty in pricing.quantity_options(tiers):
+        options = pricing.quantity_options(tiers) if view.show_bulk_buttons else [1]
+        for qty in options:
             if qty > view.available_stock:
                 continue
-            unit = pricing.unit_price_for(qty, tiers)
-            total = qty * unit
+            total = pricing.total_for(qty, tiers)
             if qty == 1:
                 label = f"{qty}個 ({total:,}円)"
             else:
+                unit = pricing.unit_price_for(qty, tiers)
                 label = f"{qty}個 ({total:,}円 / @{unit:,}円)"
             rows.append([_btn(label, f"shop:buy:{view.id}:{qty}")])
         rows.append([_btn("🔢 数量を入力", f"shop:qty:{view.id}")])

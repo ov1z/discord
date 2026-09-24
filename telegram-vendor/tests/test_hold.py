@@ -15,7 +15,7 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, **kwargs) -> None:
         self.sent.append((chat_id, text))
 
     async def get_chat(self, chat_id: int):
@@ -32,7 +32,7 @@ def _container(shop: Shop, seconds: int = 0) -> Container:
         inventory=shop.inventory,
         orders=shop.orders,
         payments=shop.payments,
-        paypay=None,  # type: ignore[arg-type]  (unused here)
+        paypay=None,
         provider=shop.provider,
         users=shop.users,
     )
@@ -56,7 +56,7 @@ async def test_hold_is_reported_and_not_delivered(shop: Shop) -> None:
     assert result.outcome == PurchaseOutcome.PAYMENT_HELD
     assert result.delivered_content is None
     assert await _status(shop, oid) == OrderStatus.PAYMENT_UNKNOWN.value
-    assert await shop.inventory.count_available(pid) == 1  # nothing reserved
+    assert await shop.inventory.count_available(pid) == 1
 
 
 async def test_hold_released_then_recheck_delivers(shop: Shop) -> None:
@@ -65,7 +65,7 @@ async def test_hold_released_then_recheck_delivers(shop: Shop) -> None:
     shop.provider.hold_on_accept.add("HOLD2")
     await shop.payments.process_payment_link(oid, mock_link(500, "HOLD2"))
 
-    shop.provider.hold_on_accept.discard("HOLD2")  # buyer released the hold
+    shop.provider.hold_on_accept.discard("HOLD2")
     result = await shop.payments.reverify_and_settle(oid, retry_accept=True)
     assert result.delivered_content is not None
     await shop.payments.confirm_delivered(oid)
@@ -95,7 +95,7 @@ async def test_recheck_never_double_receives(shop: Shop) -> None:
     r1 = await shop.payments.reverify_and_settle(oid, retry_accept=True)
     r2 = await shop.payments.reverify_and_settle(oid, retry_accept=True)
     assert r1.delivered_content is not None
-    assert r2.delivered_content == r1.delivered_content  # same item, no 2nd accept
+    assert r2.delivered_content == r1.delivered_content
     assert await shop.inventory.count_available(pid) == 1
 
 

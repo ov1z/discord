@@ -7,7 +7,14 @@ from __future__ import annotations
 
 
 class PayPayError(Exception):
-    """Base class for all PayPay-related failures."""
+    """Base class for all PayPay-related failures.
+
+    ``display_message`` carries the text PayPay meant the user to see (its
+    "half sheet"), e.g. "現在ご利用を制限しています". It explains the refusal
+    and contains no credentials, so it is safe to show the admin.
+    """
+
+    display_message: str | None = None
 
 
 class PayPayAuthError(PayPayError):

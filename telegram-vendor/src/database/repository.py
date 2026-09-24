@@ -198,7 +198,6 @@ class InventoryRepository:
         )
         await self.session.flush()
         if result.rowcount != 1:
-            # Lost the race; caller may retry.
             return None
         return await self.session.get(Inventory, candidate_id)
 
@@ -237,7 +236,7 @@ class InventoryRepository:
             )
         )
         if len(candidate_ids) < need:
-            return None  # insufficient stock; reserve nothing (no partial)
+            return None
 
         result = await self.session.execute(
             update(Inventory)
@@ -251,7 +250,6 @@ class InventoryRepository:
         )
         await self.session.flush()
         if result.rowcount != need:
-            # Lost a race on some rows; roll back this unit of work.
             await self.session.rollback()
             return None
         return await self.list_reserved_for_order(order_id)
@@ -365,6 +363,18 @@ class OrderRepository:
             )
         ).all()
 
+    async def list_for_user_by_status(
+        self, telegram_user_id: int, statuses: Sequence[str]
+    ) -> Sequence[Order]:
+        return (
+            await self.session.scalars(
+                select(Order).where(
+                    Order.telegram_user_id == telegram_user_id,
+                    Order.status.in_(list(statuses)),
+                )
+            )
+        ).all()
+
     async def list_by_status(self, statuses: Sequence[str]) -> Sequence[Order]:
         return (
             await self.session.scalars(
@@ -403,6 +413,16 @@ class PaymentRepository:
     async def get_for_order(self, order_id: int) -> Payment | None:
         return await self.session.scalar(
             select(Payment).where(Payment.order_id == order_id)
+        )
+
+    async def find_by_external_id(
+        self, provider: str, external_payment_id: str
+    ) -> Payment | None:
+        return await self.session.scalar(
+            select(Payment).where(
+                Payment.provider == provider,
+                Payment.external_payment_id == external_payment_id,
+            )
         )
 
     async def find_by_link_id(

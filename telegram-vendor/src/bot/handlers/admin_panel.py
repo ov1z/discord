@@ -45,13 +45,10 @@ async def _show(callback: CallbackQuery, text: str, markup) -> None:
         return
     try:
         await msg.edit_text(text, reply_markup=markup)
-    except Exception:  # noqa: BLE001 - message unchanged / too old
+    except Exception:
         await msg.answer(text, reply_markup=markup)
 
 
-# --------------------------------------------------------------------------- #
-# Entry
-# --------------------------------------------------------------------------- #
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, services: Container, state: FSMContext) -> None:
     if message.from_user is None or not services.is_admin(message.from_user.id):
@@ -70,9 +67,6 @@ async def cb_home(callback: CallbackQuery, services: Container, state: FSMContex
     await callback.answer()
 
 
-# --------------------------------------------------------------------------- #
-# Products
-# --------------------------------------------------------------------------- #
 @router.callback_query(F.data == "ap:products")
 async def cb_products(callback: CallbackQuery, services: Container) -> None:
     if not _is_admin_cb(callback, services):
@@ -84,7 +78,11 @@ async def cb_products(callback: CallbackQuery, services: Container) -> None:
         for p in products:
             state_mark = "" if p.active else "（無効）"
             note = " 📝" if p.notes else ""
-            lines.append(f"ID{p.id}: {p.name} {p.price}円 / 在庫{p.available_stock}{note}{state_mark}")
+            bulk = "" if p.show_bulk_buttons else " 🔢オフ"
+            lines.append(
+                f"ID{p.id}: {p.name} {p.price}円 / 在庫{p.available_stock}"
+                f"{note}{bulk}{state_mark}"
+            )
         text = "\n".join(lines)
     else:
         text = "商品はまだありません。「商品追加」から登録してください。"
@@ -108,7 +106,7 @@ async def cb_add_product(callback: CallbackQuery, services: Container, state: FS
     await callback.answer()
 
 
-@router.message(AdminStates.ADD_PRODUCT, F.text)
+@router.message(AdminStates.ADD_PRODUCT, F.text, ~F.text.startswith("/"))
 async def on_add_product(message: Message, services: Container, state: FSMContext) -> None:
     if message.from_user is None or not services.is_admin(message.from_user.id):
         return
@@ -156,9 +154,6 @@ async def cb_del_do(callback: CallbackQuery, services: Container) -> None:
     await _show(callback, "🗑 削除完了。商品管理に戻ります。", kb.products_menu_keyboard())
 
 
-# --------------------------------------------------------------------------- #
-# Restock
-# --------------------------------------------------------------------------- #
 @router.callback_query(F.data == "ap:restock")
 async def cb_restock_pick(callback: CallbackQuery, services: Container) -> None:
     if not _is_admin_cb(callback, services):
@@ -195,7 +190,7 @@ async def cb_restock_start(callback: CallbackQuery, services: Container, state: 
     await callback.answer()
 
 
-@router.message(AdminStates.RESTOCK, F.text)
+@router.message(AdminStates.RESTOCK, F.text, ~F.text.startswith("/"))
 async def on_restock(message: Message, services: Container, state: FSMContext) -> None:
     if message.from_user is None or not services.is_admin(message.from_user.id):
         return
@@ -213,9 +208,93 @@ async def on_restock(message: Message, services: Container, state: FSMContext) -
     )
 
 
-# --------------------------------------------------------------------------- #
-# Notes
-# --------------------------------------------------------------------------- #
+@router.callback_query(F.data == "ap:desc")
+async def cb_desc_pick(callback: CallbackQuery, services: Container) -> None:
+    if not _is_admin_cb(callback, services):
+        await callback.answer("権限がありません。", show_alert=True)
+        return
+    products = await services.products.list_all()
+    if not products:
+        await callback.answer("先に商品を追加してください。", show_alert=True)
+        return
+    await _show(callback, "📄 商品説明を設定する商品を選んでください:",
+                kb.product_picker_keyboard(products, "descp"))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ap:descp:"))
+async def cb_desc_start(
+    callback: CallbackQuery, services: Container, state: FSMContext
+) -> None:
+    if not _is_admin_cb(callback, services):
+        await callback.answer("権限がありません。", show_alert=True)
+        return
+    pid = int(callback.data.split(":")[2])
+    product = await services.products.get(pid)
+    if product is None:
+        await callback.answer("商品が見つかりません。", show_alert=True)
+        return
+    await state.set_state(AdminStates.SET_DESC)
+    await state.update_data(product_id=pid)
+    current = (
+        f"\n\n現在の説明:\n{product.description}" if product.description else ""
+    )
+    await _show(
+        callback,
+        f"📄「{product.name}」の商品説明を送ってください。\n"
+        "購入画面で商品名の下に表示されます。改行してそのまま複数行書けます。"
+        f"{current}",
+        kb.text_input_keyboard(f"ap:descclr:{pid}"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ap:descclr:"))
+async def cb_desc_clear(
+    callback: CallbackQuery, services: Container, state: FSMContext
+) -> None:
+    if not _is_admin_cb(callback, services):
+        await callback.answer("権限がありません。", show_alert=True)
+        return
+    pid = int(callback.data.split(":")[2])
+    await services.products.set_description(pid, "")
+    await state.clear()
+    await _show(callback, "🗑 商品説明を空にしました。", kb.products_menu_keyboard())
+    await callback.answer("空にしました。")
+
+
+@router.callback_query(F.data.startswith("ap:noteclr:"))
+async def cb_note_clear(
+    callback: CallbackQuery, services: Container, state: FSMContext
+) -> None:
+    if not _is_admin_cb(callback, services):
+        await callback.answer("権限がありません。", show_alert=True)
+        return
+    pid = int(callback.data.split(":")[2])
+    await services.products.set_notes(pid, "")
+    await state.clear()
+    await _show(callback, "🗑 注意事項を空にしました。", kb.products_menu_keyboard())
+    await callback.answer("空にしました。")
+
+
+@router.message(AdminStates.SET_DESC, F.text, ~F.text.startswith("/"))
+async def on_desc(message: Message, services: Container, state: FSMContext) -> None:
+    if message.from_user is None or not services.is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    pid = data.get("product_id")
+    if pid is None:
+        await state.clear()
+        await message.answer("対象商品が不明です。最初からやり直してください。")
+        return
+    await services.products.set_description(pid, (message.text or "").strip())
+    await state.clear()
+    await message.answer(
+        "✅ 商品説明を設定しました。購入画面に反映されます。",
+        reply_markup=kb.products_menu_keyboard(),
+    )
+
+
 @router.callback_query(F.data == "ap:note")
 async def cb_note_pick(callback: CallbackQuery, services: Container) -> None:
     if not _is_admin_cb(callback, services):
@@ -247,12 +326,12 @@ async def cb_note_start(callback: CallbackQuery, services: Container, state: FSM
         callback,
         f"📝「{product.name}」の注意事項を送ってください（配布後に商品と一緒に届きます）。"
         f"{current}",
-        kb.cancel_input_keyboard("ap:products"),
+        kb.text_input_keyboard(f"ap:noteclr:{pid}"),
     )
     await callback.answer()
 
 
-@router.message(AdminStates.SET_NOTE, F.text)
+@router.message(AdminStates.SET_NOTE, F.text, ~F.text.startswith("/"))
 async def on_note(message: Message, services: Container, state: FSMContext) -> None:
     if message.from_user is None or not services.is_admin(message.from_user.id):
         return
@@ -270,9 +349,6 @@ async def on_note(message: Message, services: Container, state: FSMContext) -> N
     )
 
 
-# --------------------------------------------------------------------------- #
-# Price tiers (bulk discount)
-# --------------------------------------------------------------------------- #
 @router.callback_query(F.data == "ap:tiers")
 async def cb_tiers_pick(callback: CallbackQuery, services: Container) -> None:
     if not _is_admin_cb(callback, services):
@@ -303,15 +379,17 @@ async def cb_tiers_start(callback: CallbackQuery, services: Container, state: FS
     await _show(
         callback,
         f"💹「{view.name}」の数量別価格を送ってください。\n\n"
-        "形式: 数量:単価 をカンマ区切り\n"
-        "例: 1:1800,5:1600,10:1500,50:1000\n\n"
+        "形式: 数量:合計金額 をカンマ区切り\n"
+        "例: 1:500,2:900,3:1300,10:4000\n"
+        "（金額は単価ではなく、その個数のときの合計です）\n"
+        "設定のない数量は、直近下の設定から計算されます。\n\n"
         f"現在:\n{pricing.format_tiers(view.tiers)}",
         kb.cancel_input_keyboard("ap:products"),
     )
     await callback.answer()
 
 
-@router.message(AdminStates.SET_TIERS, F.text)
+@router.message(AdminStates.SET_TIERS, F.text, ~F.text.startswith("/"))
 async def on_tiers(message: Message, services: Container, state: FSMContext) -> None:
     if message.from_user is None or not services.is_admin(message.from_user.id):
         return
@@ -324,7 +402,7 @@ async def on_tiers(message: Message, services: Container, state: FSMContext) -> 
         return
     tiers_json = pricing.parse_tiers_text(message.text or "")
     if tiers_json is None:
-        await message.answer("形式が違います。例: 1:1800,5:1600,10:1500,50:1000")
+        await message.answer("形式が違います。例: 1:500,2:900,3:1300,10:4000")
         return
     await services.products.set_tiers(pid, tiers_json)
     await state.clear()
@@ -335,9 +413,42 @@ async def on_tiers(message: Message, services: Container, state: FSMContext) -> 
     )
 
 
-# --------------------------------------------------------------------------- #
-# Stock overview
-# --------------------------------------------------------------------------- #
+_BULK_TEXT = (
+    "🔢 まとめ買いボタンの表示\n\n"
+    "商品を押すたびに 表示 / 非表示 が切り替わります。\n"
+    "非表示にすると購入画面のボタンは「1個」と「🔢 数量を入力」だけになります"
+    "（数量を入力すればまとめ買い価格はそのまま適用されます）。"
+)
+
+
+@router.callback_query(F.data == "ap:bulk")
+async def cb_bulk_list(callback: CallbackQuery, services: Container) -> None:
+    if not _is_admin_cb(callback, services):
+        await callback.answer("権限がありません。", show_alert=True)
+        return
+    products = await services.products.list_all()
+    if not products:
+        await callback.answer("先に商品を追加してください。", show_alert=True)
+        return
+    await _show(callback, _BULK_TEXT, kb.bulk_buttons_keyboard(products))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ap:bulkp:"))
+async def cb_bulk_toggle(callback: CallbackQuery, services: Container) -> None:
+    if not _is_admin_cb(callback, services):
+        await callback.answer("権限がありません。", show_alert=True)
+        return
+    pid = int(callback.data.split(":")[2])
+    new_value = await services.products.toggle_bulk_buttons(pid)
+    if new_value is None:
+        await callback.answer("商品が見つかりません。", show_alert=True)
+        return
+    products = await services.products.list_all()
+    await _show(callback, _BULK_TEXT, kb.bulk_buttons_keyboard(products))
+    await callback.answer("表示にしました。" if new_value else "非表示にしました。")
+
+
 @router.callback_query(F.data == "ap:stock")
 async def cb_stock(callback: CallbackQuery, services: Container) -> None:
     if not _is_admin_cb(callback, services):
@@ -359,9 +470,6 @@ async def cb_stock(callback: CallbackQuery, services: Container) -> None:
     await callback.answer()
 
 
-# --------------------------------------------------------------------------- #
-# Orders
-# --------------------------------------------------------------------------- #
 @router.callback_query(F.data == "ap:orders")
 async def cb_orders(callback: CallbackQuery, services: Container) -> None:
     if not _is_admin_cb(callback, services):
@@ -450,9 +558,6 @@ async def cb_order_cancel(callback: CallbackQuery, services: Container) -> None:
     await cb_order_detail(callback, services)
 
 
-# --------------------------------------------------------------------------- #
-# Broadcast
-# --------------------------------------------------------------------------- #
 @router.callback_query(F.data == "ap:broadcast")
 async def cb_broadcast(callback: CallbackQuery, services: Container, state: FSMContext) -> None:
     if not _is_admin_cb(callback, services):
@@ -469,9 +574,6 @@ async def cb_broadcast(callback: CallbackQuery, services: Container, state: FSMC
     await callback.answer()
 
 
-# --------------------------------------------------------------------------- #
-# PayPay
-# --------------------------------------------------------------------------- #
 @router.callback_query(F.data == "ap:paypay")
 async def cb_paypay(callback: CallbackQuery, services: Container) -> None:
     if not _is_admin_cb(callback, services):

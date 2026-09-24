@@ -17,7 +17,6 @@ from database.repository import (
 from services import pricing
 
 _CODE_ALPHABET = string.ascii_uppercase + string.digits
-# Avoid ambiguous characters.
 _CODE_ALPHABET = _CODE_ALPHABET.translate(str.maketrans("", "", "O0I1"))
 
 
@@ -39,11 +38,11 @@ class CreateOrderResult:
     order_id: int
     order_code: str
     product_name: str
-    price: int            # total the buyer must pay
+    price: int
     expires_at: datetime
     quantity: int = 1
     unit_price: int = 0
-    reused: bool = False  # an existing active order was returned
+    reused: bool = False
     out_of_stock: bool = False
 
 
@@ -61,7 +60,8 @@ class OrderService:
     ) -> CreateOrderResult | None:
         """Create a WAITING_PAYMENT order for *quantity* units.
 
-        Price uses the product's bulk-discount tiers (total = qty * unit_price).
+        Price comes from the product's per-quantity price table (each quantity
+        has its own total; unpriced quantities are prorated).
         Idempotent against double presses: an existing WAITING_PAYMENT order for
         the same product is updated to the new quantity and reused; an order
         that already progressed is returned as-is.
@@ -77,8 +77,8 @@ class OrderService:
                 return None
 
             tiers = pricing.parse_tiers(product.price_tiers, product.price)
+            total = pricing.total_for(quantity, tiers)
             unit_price = pricing.unit_price_for(quantity, tiers)
-            total = quantity * unit_price
 
             available = await irepo.count_available(product_id)
 
@@ -86,7 +86,6 @@ class OrderService:
                 telegram_user_id, product_id
             )
             if existing is not None:
-                # Only a not-yet-paid order can be re-priced safely.
                 if existing.status == OrderStatus.WAITING_PAYMENT.value:
                     existing.quantity = quantity
                     existing.unit_price = unit_price
@@ -191,6 +190,24 @@ class OrderService:
                 await session.commit()
                 return True
             return False
+
+    async def abandon_unpaid_for_user(self, telegram_user_id: int) -> int:
+        """Cancel this buyer's not-yet-paid orders. Returns how many.
+
+        Only WAITING_PAYMENT qualifies: once a payment is being checked,
+        accepted or settled, money may be involved and the order must survive
+        so it can be delivered or investigated.
+        """
+        async with self._sm() as session:
+            repo = OrderRepository(session)
+            orders = await repo.list_for_user_by_status(
+                telegram_user_id, [OrderStatus.WAITING_PAYMENT.value]
+            )
+            for order in orders:
+                order.status = OrderStatus.CANCELLED.value
+            if orders:
+                await session.commit()
+            return len(orders)
 
     async def cancel(self, order_code: str) -> bool:
         async with self._sm() as session:

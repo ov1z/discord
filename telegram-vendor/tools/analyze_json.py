@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Pretty-print the (redacted) structure of a captured PayPay JSON response.
 
 Usage:
@@ -15,7 +14,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from security.redaction import redact  # noqa: E402
+from security.redaction import redact
 
 
 def _schema(value: object, depth: int = 0) -> object:

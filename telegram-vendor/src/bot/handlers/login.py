@@ -17,6 +17,8 @@ from aiogram.types import Message
 
 from bot.container import Container
 from bot.states.login import LoginStates
+from paypay import auth
+from paypay.auth import extract_otl_id
 from paypay.exceptions import PayPayError, PayPayOTPRequired
 from paypay.models import LoginStatus
 from services.paypay_service import AuthState
@@ -33,8 +35,57 @@ def _is_private(message: Message) -> bool:
 async def _delete_silently(message: Message) -> None:
     try:
         await message.delete()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
+
+
+_LOGIN_STAGE_TEXT = {
+    auth.STAGE_WAF: "🔐 ログイン試行中... (1/4) anti-bot を通過しています",
+    auth.STAGE_SESSION: "🔐 ログイン試行中... (2/4) 認証セッションを準備しています",
+    auth.STAGE_PASSWORD: "🔐 ログイン試行中... (3/4) ログイン情報を確認しています",
+    auth.STAGE_OTP_SEND: "🔐 ログイン試行中... (4/4) 認証リンクを送信しています",
+    auth.STAGE_TOKEN: "🔐 ログイン試行中... トークンを取得しています",
+}
+
+_OTP_STAGE_TEXT = {
+    auth.STAGE_OTL: "🔑 確認中... (1/2) ワンタイムリンクを検証しています",
+    auth.STAGE_TOKEN: "🔑 確認中... (2/2) トークンを取得しています",
+}
+
+
+def _progress_updater(status: Message, texts: dict[str, str]):
+    """Edit *status* in place as stages arrive; ``finish`` writes the result.
+
+    Progress is cosmetic: a failed edit (rate limit, deleted message) must
+    never affect the login itself. ``finish`` appends the stage the flow had
+    reached, so a failure says where it stopped.
+    """
+    done = False
+    reached: list[str] = []
+
+    async def on_progress(stage: str) -> None:
+        if done:
+            return
+        text = texts.get(stage)
+        if not text:
+            return
+        reached.append(text)
+        try:
+            await status.edit_text(text)
+        except Exception:
+            pass
+
+    async def finish(text: str, with_stage: bool = False) -> None:
+        nonlocal done
+        done = True
+        if with_stage and reached:
+            text = f"{text}\n\n（最後に進んだ段階: {reached[-1]}）"
+        try:
+            await status.edit_text(text)
+        except Exception:
+            await status.answer(text)
+
+    return on_progress, finish
 
 
 def _fmt_status(view, ready: bool) -> str:
@@ -87,13 +138,12 @@ async def prompt_login(message: Message, services: Container, state: FSMContext)
     )
 
 
-@router.message(LoginStates.WAITING_CREDENTIALS, F.text)
+@router.message(LoginStates.WAITING_CREDENTIALS, F.text, ~F.text.startswith("/"))
 async def on_credentials(message: Message, services: Container, state: FSMContext) -> None:
     if not services.is_admin(message.from_user.id) or not _is_private(message):
         return
 
     raw = message.text or ""
-    # Delete the credential message ASAP.
     await _delete_silently(message)
 
     if ":" not in raw:
@@ -105,57 +155,80 @@ async def on_credentials(message: Message, services: Container, state: FSMContex
         await message.answer("電話番号とパスワードを正しく入力してください。")
         return
 
+    status = await message.answer("🔐 ログイン試行中...")
+    on_progress, finish = _progress_updater(status, _LOGIN_STAGE_TEXT)
+
     try:
-        result = await services.paypay.begin_login(phone, password)
-    except PayPayError:
-        # Never surface raw PayPay error (may contain credentials).
+        result = await services.paypay.begin_login(
+            phone, password, on_progress=on_progress
+        )
+    except PayPayError as exc:
         await state.clear()
-        await message.answer("PayPayログインに失敗しました。")
+        await finish(
+            str(exc) if str(exc) else "PayPayログインに失敗しました。",
+            with_stage=True,
+        )
         return
     finally:
-        # Drop references immediately.
-        phone = password = raw = ""  # noqa: F841
+        phone = password = raw = ""
 
     if result.status == LoginStatus.SUCCESS:
         await state.clear()
-        await message.answer("PayPayログイン成功")
+        await finish("✅ PayPayログイン成功")
     elif result.status == LoginStatus.OTP_REQUIRED:
         await state.set_state(LoginStates.WAITING_OTP)
-        await message.answer(
-            "SMS認証コードを送信しました。\n"
-            "PayPayから届いた認証コード（またはワンタイムリンク）を入力してください。"
+        await finish(
+            "📩 PayPayから認証（ワンタイムリンク）を送信しました。\n\n"
+            "届いたSMSを本文ごとそのまま貼り付けて送信してください。\n"
+            "例:\n"
+            "[PayPay]ログイン承認時はURLをタップ "
+            "https://www.paypay.ne.jp/portal/oauth2/l?id=XXXXXXXX\n\n"
+            "リンクだけ・IDだけでも受け付けます。"
         )
     else:
         await state.clear()
-        await message.answer("PayPayログインに失敗しました。")
+        await finish(
+            result.message or "PayPayログインに失敗しました。", with_stage=True
+        )
 
 
-@router.message(LoginStates.WAITING_OTP, F.text)
+@router.message(LoginStates.WAITING_OTP, F.text, ~F.text.startswith("/"))
 async def on_otp(message: Message, services: Container, state: FSMContext) -> None:
     if not services.is_admin(message.from_user.id) or not _is_private(message):
         return
 
-    otp = (message.text or "").strip()
+    raw_otp = (message.text or "").strip()
     await _delete_silently(message)
 
+    otp = extract_otl_id(raw_otp)
+    raw_otp = ""
+    if not otp:
+        await message.answer(
+            "ワンタイムリンクを読み取れませんでした。"
+            "SMSの本文またはリンクをそのまま貼り付けてください。"
+        )
+        return
+
+    status = await message.answer("🔑 確認中...")
+    on_progress, finish = _progress_updater(status, _OTP_STAGE_TEXT)
+
     try:
-        result = await services.paypay.submit_otp(otp)
+        result = await services.paypay.submit_otp(otp, on_progress=on_progress)
     except PayPayOTPRequired as exc:
-        # Wrong code, or the final step is unavailable (see TODO_PAYPAY.md).
-        await message.answer(str(exc) if str(exc) else "認証コードが正しくありません")
+        await finish(str(exc) if str(exc) else "認証コードが正しくありません")
         return
     except PayPayError:
         await state.clear()
-        await message.answer("PayPayログインに失敗しました。")
+        await finish("PayPayログインに失敗しました。")
         return
     finally:
-        otp = ""  # noqa: F841
+        otp = ""
 
     if result.status == LoginStatus.SUCCESS:
         await state.clear()
-        await message.answer("PayPayログイン成功")
+        await finish("✅ PayPayログイン成功")
     else:
-        await message.answer("認証コードが正しくありません")
+        await finish("認証コードが正しくありません")
 
 
 @router.message(Command("login_token"))
@@ -177,7 +250,7 @@ async def cmd_login_token(
         return
 
     raw = message.text or ""
-    await _delete_silently(message)  # token must not linger in chat history
+    await _delete_silently(message)
 
     parts = raw.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
@@ -194,12 +267,12 @@ async def cmd_login_token(
         await services.paypay.adopt_token(
             access_token, refresh_token=refresh_token, device_uuid=device_uuid
         )
-    except Exception:  # noqa: BLE001 - never echo token in the error
+    except Exception:
         await state.clear()
         await message.answer("トークンの設定に失敗しました。")
         return
     finally:
-        raw = access_token = ""  # noqa: F841 - drop references
+        raw = access_token = ""
 
     await state.clear()
     ready = await services.provider.is_ready()
