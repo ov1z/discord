@@ -32,6 +32,7 @@ class MockPaymentProvider(PaymentProvider):
         self.timeout_on_accept: set[str] = set()
         self.timeout_after_accept: set[str] = set()
         self.hold_on_accept: set[str] = set()
+        self.fail_accept: set[str] = set()
         self.ready: bool = True
         self._request_seq = 0
         self._history: list[Transaction] = []
@@ -68,14 +69,19 @@ class MockPaymentProvider(PaymentProvider):
         *,
         incoming: bool = True,
         status: str = "COMPLETED",
+        completed: bool | None = None,
+        created_at=None,
     ) -> Transaction:
         """Test hook: put a transaction at the top of the history."""
+        if completed is not None:
+            status = "COMPLETED" if completed else "PENDING"
         tx = Transaction(
             transaction_id=transaction_id,
             amount=amount,
             incoming=incoming,
             status=status,
             order_type="P2P_CODE_RECEPTION" if incoming else "P2PSEND",
+            created_at=created_at,
         )
         self._history.insert(0, tx)
         return tx
@@ -107,6 +113,9 @@ class MockPaymentProvider(PaymentProvider):
 
         if link_id in self.hold_on_accept:
             raise PayPayTemporaryHold("temporary hold (test hook)")
+
+        if link_id in self.fail_accept:
+            return AcceptResult(outcome=AcceptOutcome.FAILED, message="declined")
 
         if link_id in self._received:
             raise PayPayAlreadyAccepted("already received")

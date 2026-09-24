@@ -42,7 +42,7 @@ async def cb_cancel(
 ) -> None:
     assert callback.data is not None
     order_code = callback.data.split(":", 1)[1]
-    ok = await services.orders.cancel(order_code)
+    ok = await services.orders.cancel_for_user(order_code, callback.from_user.id)
     await screen.clear_keeping_screen(state)
     await callback.answer(
         "注文をキャンセルしました。" if ok else "この注文はキャンセルできません。"

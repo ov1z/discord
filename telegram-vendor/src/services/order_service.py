@@ -222,3 +222,19 @@ class OrderService:
             order.status = OrderStatus.CANCELLED.value
             await session.commit()
             return True
+
+    async def cancel_for_user(self, order_code: str, telegram_user_id: int) -> bool:
+        """Buyer-initiated cancel: only the buyer's OWN, not-yet-paid order.
+
+        Prevents cancelling someone else's order (griefing) or a paid/delivering
+        one (which would free reserved stock the buyer already paid for).
+        """
+        async with self._sm() as session:
+            order = await OrderRepository(session).get_by_code(order_code)
+            if order is None or order.telegram_user_id != telegram_user_id:
+                return False
+            if order.status != OrderStatus.WAITING_PAYMENT.value:
+                return False
+            order.status = OrderStatus.CANCELLED.value
+            await session.commit()
+            return True

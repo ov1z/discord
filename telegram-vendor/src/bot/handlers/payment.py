@@ -273,6 +273,11 @@ def buyer_message_for(result: PurchaseResult) -> str | None:
             "その取引はまだ完了していません。\n"
             "支払いが完了してからもう一度送ってください。"
         )
+    if o == PurchaseOutcome.TRANSACTION_TOO_OLD:
+        return (
+            "その取引はこの注文より前のものです。\n"
+            "この注文用に新しくお支払いいただいた取引番号を送ってください。"
+        )
     if o == PurchaseOutcome.ORDER_NOT_WAITING:
         return "この注文はすでに処理が終わっています。\n/start から選び直してください。"
     if o == PurchaseOutcome.DELIVERED:

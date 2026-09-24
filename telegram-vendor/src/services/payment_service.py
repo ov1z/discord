@@ -18,7 +18,7 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
@@ -59,6 +59,7 @@ class PurchaseOutcome(str, enum.Enum):
     TRANSACTION_NOT_FOUND = "TRANSACTION_NOT_FOUND"
     TRANSACTION_NOT_INCOMING = "TRANSACTION_NOT_INCOMING"
     TRANSACTION_NOT_COMPLETED = "TRANSACTION_NOT_COMPLETED"
+    TRANSACTION_TOO_OLD = "TRANSACTION_TOO_OLD"
 
 
 @dataclass(slots=True)
@@ -250,6 +251,7 @@ class PaymentService:
             expected = order.price
             status = order.status
             expires_at = self._aware(order.expires_at)
+            order_created = self._aware(order.created_at)
 
         if status != OrderStatus.WAITING_PAYMENT.value:
             if status == OrderStatus.DELIVERED.value:
@@ -304,6 +306,19 @@ class PaymentService:
             return PurchaseResult(
                 PurchaseOutcome.AMOUNT_MISMATCH, order_code, expected,
                 actual_amount=match.amount,
+            )
+        # The payment must have arrived AFTER the order was placed, so a buyer
+        # cannot point at an unrelated / pre-existing incoming payment of the
+        # same amount. (5 min skew tolerance; skipped only if a timestamp is
+        # genuinely unavailable.)
+        tx_created = self._aware(match.created_at)
+        if (
+            tx_created is not None
+            and order_created is not None
+            and tx_created < order_created - timedelta(minutes=5)
+        ):
+            return PurchaseResult(
+                PurchaseOutcome.TRANSACTION_TOO_OLD, order_code, expected
             )
 
         if not await self._claim_transaction(order_id, match):

@@ -100,35 +100,6 @@ class Transaction:
 
 
 @dataclass(slots=True)
-class RequestLink:
-    """A payment request (P2P code) the shop issues for an exact amount."""
-
-    link: str
-    code: str
-    amount: int
-    session_id: str | None = None
-    raw: dict = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class Transaction:
-    """One row of the account's payment history."""
-
-    transaction_id: str
-    amount: int
-    incoming: bool
-    status: str
-    order_type: str = ""
-    description: str = ""
-    created_at: datetime | None = None
-    raw: dict = field(default_factory=dict)
-
-    @property
-    def completed(self) -> bool:
-        return self.status.upper() in {"COMPLETED", "SUCCESS", "RECEIVED"}
-
-
-@dataclass(slots=True)
 class PaymentInfo:
     """Normalized view of a P2P send-money link."""
 
