@@ -1,0 +1,38 @@
+# secrets / runtime
+.env
+*.enc
+paypay_session*
+*.db
+*.sqlite
+*.sqlite3
+*.db.bak*
+shop.db.bak-*
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# test / tooling
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.coverage
+htmlcov/
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# analysis inputs (may contain secrets)
+tools/samples/
+*.har
+_backup_before_ui_*/
+.last_ui_backup

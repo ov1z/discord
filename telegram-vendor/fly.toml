@@ -1,0 +1,39 @@
+# Fly.io deployment for the Telegram vending bot.
+# - primary_region = "nrt" (Tokyo) so PayPay sees a Japanese IP (required).
+# - No [http_service]: the bot uses long polling, so it needs no inbound port.
+# - 1 machine kept always running (auto_stop disabled) for 24/7 operation.
+#
+# Set app name below, then:
+#   fly launch --no-deploy        (or: fly apps create <name>)
+#   fly volume create data --region nrt --size 1
+#   fly secrets set TELEGRAM_BOT_TOKEN=... ADMIN_TELEGRAM_ID=... \
+#                   SESSION_ENCRYPTION_KEY=... PAYMENT_PROVIDER=paypay
+#   fly deploy
+
+app = "telegram-vendor"       # ← 好きな一意の名前に変更
+primary_region = "nrt"        # Tokyo（PayPayは日本IP必須）
+
+[build]
+
+[env]
+  PAYMENT_PROVIDER = "mock"           # 実運用は "paypay"
+  DATABASE_URL = "sqlite+aiosqlite:////data/shop.db"
+  PAYPAY_SESSION_PATH = "/data/paypay_session.enc"
+  ORDER_TTL_SECONDS = "600"
+  HOLD_RECHECK_SECONDS = "60"
+
+# Persist the SQLite DB + encrypted PayPay session across restarts/deploys.
+[[mounts]]
+  source = "data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1024mb"           # Chromium(ログイン時)に必要。512mbだと不足しがち
+
+[processes]
+  app = "python src/main.py"
+
+# Keep exactly one machine running at all times (no scale-to-zero).
+[deploy]
+  strategy = "immediate"

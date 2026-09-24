@@ -1,0 +1,4 @@
+# runtime logs (bot output, not part of the project)
+bot.log
+bot.log.*
+*.log
