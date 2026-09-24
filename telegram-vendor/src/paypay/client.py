@@ -477,10 +477,14 @@ class PayPayClient:
         }
         if info.has_password and passcode:
             payload["passcode"] = passcode
+        # Do not log the raw verification code: it is the whole link. Mask it
+        # to a short prefix so the log stays useful for debugging without being
+        # replayable if the log file leaks.
+        masked = f"{code[:4]}…({len(code)})" if code else "-"
         logger.info(
             "accepting link %s: requestId=%s orderId=%s messageId=%s channel=%s "
             "passcode=%s",
-            code,
+            masked,
             "有" if info.request_id else "無",
             "有" if info.payment_id else "無",
             "有" if info.message_id else "無",

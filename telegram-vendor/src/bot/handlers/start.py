@@ -85,10 +85,17 @@ async def reset_to_shop(
     await show_shop(bot, chat_id, services, state)
 
 
+def _is_private(message: Message) -> bool:
+    return message.chat.type == "private"
+
+
 @router.message(Command("start"))
 async def cmd_start(
     message: Message, services: Container, state: FSMContext, bot: Bot
 ) -> None:
+    if not _is_private(message):
+        await message.answer("ショップは個人チャットでご利用ください。")
+        return
     user = message.from_user
     if user is not None:
         async with get_sessionmaker()() as session:
@@ -107,6 +114,9 @@ async def cmd_start(
 async def cmd_shop(
     message: Message, services: Container, state: FSMContext, bot: Bot
 ) -> None:
+    if not _is_private(message):
+        await message.answer("ショップは個人チャットでご利用ください。")
+        return
     user_id = message.from_user.id if message.from_user else 0
     await reset_to_shop(bot, message.chat.id, services, state, user_id)
 

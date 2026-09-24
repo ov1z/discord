@@ -141,6 +141,19 @@ class PaymentService:
                 PurchaseOutcome.LINK_ALREADY_USED, order_code, expected
             )
 
+        # Re-read the price now: the buyer may have changed this order's
+        # quantity (and price) during the slow link inspection above. Match the
+        # link against the CURRENT price so an old, smaller amount cannot buy a
+        # newly enlarged quantity. _claim_link below moves the order to
+        # CHECKING_PAYMENT, after which create_order can no longer re-price it.
+        async with self._sm() as session:
+            fresh = await OrderRepository(session).get(order_id)
+            if fresh is None or fresh.status != OrderStatus.WAITING_PAYMENT.value:
+                return PurchaseResult(
+                    PurchaseOutcome.ORDER_NOT_WAITING, order_code, expected
+                )
+            expected = fresh.price
+
         if info.amount != expected:
             return PurchaseResult(
                 PurchaseOutcome.AMOUNT_MISMATCH,
@@ -177,6 +190,16 @@ class PaymentService:
                 PurchaseOutcome.PAYMENT_UNKNOWN, order_code, expected
             )
 
+        if result.outcome == AcceptOutcome.ALREADY:
+            # The link was already received when we tried to accept it. That may
+            # be our own earlier (crashed) accept, but it may also be the sender
+            # reclaiming it in a race — we cannot prove the money reached US.
+            # Never auto-deliver on this; hand it to the admin to verify against
+            # the actual balance (/verify_order).
+            await self._mark_unknown(order_id, info, result.raw)
+            return PurchaseResult(
+                PurchaseOutcome.PAYMENT_UNKNOWN, order_code, expected
+            )
         if result.outcome == AcceptOutcome.HELD:
             await self._mark_unknown(order_id, info, result.raw)
             return PurchaseResult(

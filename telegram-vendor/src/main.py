@@ -45,14 +45,25 @@ def _configure_logging(level: str) -> None:
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # httpx logs each request URL at INFO, which for PayPay includes the
+    # ?verificationCode=... of a not-yet-received link. Keep those out of the
+    # logs so a leaked log file cannot be used to reconstruct a live link.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _build_provider(
     name: str, paypay_client: PayPayClient
 ) -> PaymentProvider:
-    if name.lower() == "paypay":
+    choice = name.strip().lower()
+    if choice == "paypay":
         return PayPayPaymentProvider(paypay_client)
-    return MockPaymentProvider()
+    if choice == "mock":
+        return MockPaymentProvider()
+    # Never fall back to mock silently: a typo like PAYMENT_PROVIDER=payay
+    # would otherwise accept fake links and hand out goods without real money.
+    raise SystemExit(
+        f"PAYMENT_PROVIDER='{name}' は不正です。'paypay' か 'mock' を指定してください。"
+    )
 
 
 async def _recover_undelivered(bot: Bot, container: Container) -> None:
@@ -80,6 +91,23 @@ async def _recover_undelivered(bot: Bot, container: Container) -> None:
                 )
         except Exception:
             logging.getLogger("main").exception("recovery failed for %s", code)
+
+    # Orders caught mid-accept when the bot stopped are left in CHECKING /
+    # ACCEPTING. Their real state is undetermined, so flip them to
+    # PAYMENT_UNKNOWN and let the reverify pass below settle them safely
+    # (a received link reports SUCCESS and is never re-accepted twice).
+    async with sm() as session:
+        repo = OrderRepository(session)
+        in_flight = await repo.list_by_status(
+            [
+                OrderStatus.CHECKING_PAYMENT.value,
+                OrderStatus.ACCEPTING_PAYMENT.value,
+            ]
+        )
+        for o in in_flight:
+            o.status = OrderStatus.PAYMENT_UNKNOWN.value
+        if in_flight:
+            await session.commit()
 
     async with sm() as session:
         unknown = await OrderRepository(session).list_by_status(

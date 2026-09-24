@@ -32,6 +32,9 @@ class MockPaymentProvider(PaymentProvider):
         self.timeout_after_accept: set[str] = set()
         self.hold_on_accept: set[str] = set()
         self.fail_accept: set[str] = set()
+        # Link still PENDING at inspect, but someone else received it by the
+        # time we accept (race). accept -> AlreadyAccepted, inspect stays PENDING.
+        self.already_on_accept: set[str] = set()
         self.ready: bool = True
 
     def _parse(self, url: str) -> tuple[int, str]:
@@ -77,7 +80,7 @@ class MockPaymentProvider(PaymentProvider):
         if link_id in self.fail_accept:
             return AcceptResult(outcome=AcceptOutcome.FAILED, message="declined")
 
-        if link_id in self._received:
+        if link_id in self.already_on_accept or link_id in self._received:
             raise PayPayAlreadyAccepted("already received")
 
         self._received.add(link_id)
