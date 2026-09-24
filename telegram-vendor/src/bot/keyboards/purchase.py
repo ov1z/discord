@@ -30,6 +30,15 @@ def support_keyboard(support_url: str | None = None) -> InlineKeyboardMarkup | N
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
+def delivered_keyboard(support_url: str | None = None) -> InlineKeyboardMarkup:
+    """Shown on the delivered-goods message: shop again + contact."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="🛒 もう一度買う", callback_data="shop:list")]
+    ]
+    rows += _support_row(support_url)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def error_keyboard(
     support_url: str | None = None, order_code: str | None = None
 ) -> InlineKeyboardMarkup:

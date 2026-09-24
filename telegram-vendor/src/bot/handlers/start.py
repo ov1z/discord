@@ -23,8 +23,10 @@ logger = logging.getLogger("bot.start")
 router = Router(name="start")
 
 SHOP_HEADER = (
-    "🛒 商品一覧\n\n"
-    "商品を押すと、価格・在庫を確認して購入できます。"
+    "🛒 Xアカウントショップ\n"
+    "━━━━━━━━━━━━━━\n"
+    "24時間自動配送でお買い求めいただけます。\n"
+    "購入される商品をタップしてください。"
 )
 
 
@@ -34,10 +36,21 @@ async def show_shop(
     """Render the product list into the chat's single shop message."""
     products = await services.products.list_for_shop()
     if not products:
-        await screen.render(bot, chat_id, state, "現在販売中の商品はありません。")
+        await screen.render(
+            bot, chat_id, state,
+            "🛒 Xアカウントショップ\n"
+            "━━━━━━━━━━━━━━\n"
+            "ただいま販売中の商品はありません。\n"
+            "入荷までしばらくお待ちください。",
+        )
         return
     await screen.render(
-        bot, chat_id, state, SHOP_HEADER, shop_list_keyboard(products)
+        bot, chat_id, state, SHOP_HEADER,
+        shop_list_keyboard(
+            products,
+            support_url=services.settings.support_url,
+            channel_url=services.settings.sales_channel_url,
+        ),
     )
 
 
@@ -86,7 +99,7 @@ async def cmd_start(
             )
             await session.commit()
 
-    await screen.delete_silently(message)
+    # Keep the buyer's /start message (do not delete it).
     await reset_to_shop(bot, message.chat.id, services, state, user.id if user else 0)
 
 
@@ -94,7 +107,6 @@ async def cmd_start(
 async def cmd_shop(
     message: Message, services: Container, state: FSMContext, bot: Bot
 ) -> None:
-    await screen.delete_silently(message)
     user_id = message.from_user.id if message.from_user else 0
     await reset_to_shop(bot, message.chat.id, services, state, user_id)
 

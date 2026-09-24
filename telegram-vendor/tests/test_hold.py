@@ -109,7 +109,7 @@ async def test_scheduled_recheck_delivers_to_buyer(shop: Shop) -> None:
     bot = FakeBot()
     await payment_handlers._hold_recheck(bot, _container(shop), oid, 1)
     buyer_msgs = [t for c, t in bot.sent if c == 1]
-    assert any("購入ありがとうございます" in t for t in buyer_msgs)
+    assert any("購入ありがとうございました" in t for t in buyer_msgs)
     assert await _status(shop, oid) == OrderStatus.DELIVERED.value
 
 

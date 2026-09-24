@@ -14,9 +14,10 @@ from aiogram.types import CallbackQuery, Message
 from bot import screen
 from bot.container import Container
 from bot.handlers.start import show_shop
-from bot.keyboards.products import product_detail_keyboard
+from bot.keyboards.products import agreement_keyboard, product_detail_keyboard
 from bot.keyboards.purchase import cancel_purchase_keyboard
 from bot.states.purchase import PurchaseStates
+from bot.terms import PURCHASE_TERMS
 from services import pricing
 from services.product_service import ProductView
 
@@ -28,19 +29,23 @@ _MAX_QTY = 1000
 
 
 def _detail_text(view: ProductView) -> str:
-    lines = [f"🧾 [{view.name}]を選択"]
+    lines = [f"🛍 {view.name}", "━━━━━━━━━━━━━━"]
     if view.description:
-        lines.append("")
         lines.append(view.description)
-    lines.append("")
-    lines.append("価格:")
-    lines.append(pricing.format_tiers(view.tiers))
-    lines.append("")
-    stock = f"{view.available_stock}個" if view.available_stock > 0 else "入荷待ち"
-    lines.append(f"現在庫: {stock}")
-    if view.available_stock > 0:
         lines.append("")
-        lines.append("購入数量を選んでください:")
+    priced = pricing.format_tiers(view.tiers)
+    if len(view.tiers) == 1:
+        lines.append(f"💴 価格: {priced}")
+    else:
+        lines.append("💴 価格")
+        lines.append(priced)
+    lines.append("")
+    if view.available_stock > 0:
+        lines.append(f"📦 在庫: {view.available_stock}個")
+        lines.append("")
+        lines.append("👇 数量を選んでください")
+    else:
+        lines.append("🈳 現在在庫切れです（入荷までお待ちください）")
     return "\n".join(lines)
 
 
@@ -86,7 +91,7 @@ async def cb_custom_qty(
             bot,
             callback.message.chat.id,
             state,
-            "🔢 購入したい数量を数字で送ってください（例: 3）",
+            "🔢 買いたい個数を数字で送ってください\n（例: 3）",
         )
     await callback.answer()
 
@@ -109,14 +114,11 @@ async def on_custom_qty(
             bot,
             message.chat.id,
             state,
-            "🔢 1以上の数字で送ってください（例: 3）",
+            "🔢 1以上の数字で送ってください\n（例: 3）",
         )
         return
     quantity = min(int(raw), _MAX_QTY)
-    await start_order(
-        bot, message.chat.id, services, state, message.from_user.id,
-        product_id, quantity,
-    )
+    await show_agreement(bot, message.chat.id, services, state, product_id, quantity)
 
 
 @router.callback_query(F.data.startswith("shop:buy:"))
@@ -129,9 +131,64 @@ async def cb_buy(
         await callback.answer()
         return
     await callback.answer()
+    await show_agreement(
+        bot, callback.message.chat.id, services, state, product_id, quantity
+    )
+
+
+@router.callback_query(F.data.startswith("shop:agree:"))
+async def cb_agree(
+    callback: CallbackQuery, services: Container, state: FSMContext, bot: Bot
+) -> None:
+    parts = callback.data.split(":")
+    product_id, quantity = int(parts[2]), int(parts[3])
+    if callback.message is None:
+        await callback.answer()
+        return
+    await callback.answer()
     await start_order(
         bot, callback.message.chat.id, services, state,
         callback.from_user.id, product_id, quantity,
+    )
+
+
+async def show_agreement(
+    bot: Bot,
+    chat_id: int,
+    services: Container,
+    state: FSMContext,
+    product_id: int,
+    quantity: int,
+) -> None:
+    """Consent gate: show the order summary + short terms before payment."""
+    view = await services.products.get_view(product_id)
+    if view is None or not view.active:
+        await screen.render(bot, chat_id, state, "この商品は購入できません。")
+        return
+    quantity = max(1, quantity)
+    if quantity > view.available_stock:
+        await screen.render(
+            bot, chat_id, state,
+            f"🈳 在庫が足りません（ご希望: {quantity}個）。\n"
+            "個数を減らすか、入荷までお待ちください。",
+            product_detail_keyboard(view),
+        )
+        return
+    total = view.total(quantity)
+    text = (
+        "⚠️ ご購入前の確認（必読）\n"
+        "━━━━━━━━━━━━━━\n"
+        "【注文内容】\n"
+        f"商品: {view.name}\n"
+        f"数量: {quantity}個\n"
+        f"合計: ¥{total:,}\n"
+        "━━━━━━━━━━━━━━\n\n"
+        f"{PURCHASE_TERMS}"
+    )
+    await state.set_state(None)
+    await screen.render(
+        bot, chat_id, state, text,
+        agreement_keyboard(product_id, quantity, services.settings.terms_link),
     )
 
 
@@ -154,56 +211,33 @@ async def start_order(
             bot,
             chat_id,
             state,
-            f"在庫が不足しています（購入希望: {result.quantity}個）。\n"
-            "数量を減らすか、入荷までお待ちください。",
+            f"🈳 在庫が足りません（ご希望: {result.quantity}個）。\n"
+            "個数を減らすか、入荷までお待ちください。",
             product_detail_keyboard(view) if view is not None else None,
         )
         return
 
     ttl_minutes = max(1, services.settings.order_ttl_seconds // 60)
-    qty_line = (
-        f"数量: {result.quantity}個（@{result.unit_price:,}円）\n"
-        if result.quantity > 1 else ""
+    unit_line = (
+        f"単価: ¥{result.unit_price:,}\n" if result.quantity > 1 else ""
     )
-    header = (
-        f"🧾 {result.product_name}\n\n"
-        f"{qty_line}"
-        f"金額: {result.price:,}円\n"
-        f"注文ID: {result.order_code}\n\n"
+    text = (
+        "🧾 注文確認\n"
+        "━━━━━━━━━━━━━━\n"
+        f"商品: {result.product_name}\n"
+        f"数量: {result.quantity}個\n"
+        f"{unit_line}"
+        f"合計: ¥{result.price:,}\n"
+        "━━━━━━━━━━━━━━\n\n"
+        f"💳 ¥{result.price:,} の PayPay送金リンクを作成し、\n"
+        "このチャットに貼り付けてください。\n"
+        f"（金額は必ず ¥{result.price:,} ちょうどに）\n\n"
+        "※PayPay加盟店決済ではなく、PayPay残高の個人間送金を利用します。"
+        "PayPayの補償制度の対象外となる場合があります。\n\n"
+        "入金を確認しだい、自動で商品をお届けします。\n"
+        f"⏳ 有効時間: {ttl_minutes}分"
     )
-
-    request_link = None
-    if (
-        services.settings.uses_payment_requests
-        and services.provider.supports_requests
-        and await services.provider.is_ready()
-    ):
-        try:
-            request_link = await services.provider.create_request(result.price)
-        except Exception as exc:
-            logger.warning(
-                "could not issue a payment request: %s: %s",
-                type(exc).__name__, exc,
-            )
-
-    if request_link is not None:
-        text = (
-            header
-            + "▼ この請求リンクから支払ってください\n"
-            + f"{request_link.link}\n\n"
-            + "支払い後、PayPayアプリに表示される「取引番号」を送信してください。\n\n"
-            + f"⏳ 有効時間: {ttl_minutes}分"
-        )
-        await state.set_state(PurchaseStates.WAITING_TRANSACTION_ID)
-    else:
-        text = (
-            header
-            + f"PayPayアプリで {result.price:,}円 の送金リンクを作成し、\n"
-            + "このチャットに送信してください。\n"
-            + f"⚠️ 金額は必ず {result.price:,}円 にしてください。\n\n"
-            + f"⏳ 有効時間: {ttl_minutes}分"
-        )
-        await state.set_state(PurchaseStates.WAITING_PAYPAY_LINK)
+    await state.set_state(PurchaseStates.WAITING_PAYPAY_LINK)
 
     await state.update_data(order_id=result.order_id, order_code=result.order_code)
     await screen.render(

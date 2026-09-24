@@ -18,7 +18,7 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
@@ -56,10 +56,6 @@ class PurchaseOutcome(str, enum.Enum):
     PAYMENT_UNKNOWN = "PAYMENT_UNKNOWN"
     PAYMENT_HELD = "PAYMENT_HELD"
     FAILED = "FAILED"
-    TRANSACTION_NOT_FOUND = "TRANSACTION_NOT_FOUND"
-    TRANSACTION_NOT_INCOMING = "TRANSACTION_NOT_INCOMING"
-    TRANSACTION_NOT_COMPLETED = "TRANSACTION_NOT_COMPLETED"
-    TRANSACTION_TOO_OLD = "TRANSACTION_TOO_OLD"
 
 
 @dataclass(slots=True)
@@ -224,151 +220,6 @@ class PaymentService:
         )
 
         return await self._deliver(order_id, order_code, expected, payment_id)
-
-    async def confirm_by_transaction(
-        self, order_id: int, transaction_id: str, history_limit: int = 10
-    ) -> PurchaseResult:
-        """Settle an order against a transaction in OUR OWN payment history.
-
-        The buyer supplies only the transaction number; everything that decides
-        whether goods are handed over is read back from PayPay by us.
-        """
-        lock = self._locks[order_id]
-        async with lock:
-            return await self._confirm_by_transaction(
-                order_id, transaction_id, history_limit
-            )
-
-    async def _confirm_by_transaction(
-        self, order_id: int, transaction_id: str, history_limit: int
-    ) -> PurchaseResult:
-        transaction_id = (transaction_id or "").strip()
-        async with self._sm() as session:
-            order = await OrderRepository(session).get(order_id)
-            if order is None:
-                raise ValueError(f"order {order_id} not found")
-            order_code = order.order_code
-            expected = order.price
-            status = order.status
-            expires_at = self._aware(order.expires_at)
-            order_created = self._aware(order.created_at)
-
-        if status != OrderStatus.WAITING_PAYMENT.value:
-            if status == OrderStatus.DELIVERED.value:
-                return PurchaseResult(PurchaseOutcome.DELIVERED, order_code, expected)
-            if status in (OrderStatus.PAID.value, OrderStatus.DELIVERING.value):
-                return PurchaseResult(
-                    PurchaseOutcome.PAID_NOT_DELIVERED, order_code, expected
-                )
-            return PurchaseResult(
-                PurchaseOutcome.ORDER_NOT_WAITING, order_code, expected
-            )
-
-        if expires_at and datetime.now(timezone.utc) > expires_at:
-            await self._set_status(order_id, OrderStatus.EXPIRED)
-            return PurchaseResult(PurchaseOutcome.ORDER_EXPIRED, order_code, expected)
-
-        if not await self._provider.is_ready():
-            return PurchaseResult(
-                PurchaseOutcome.PROVIDER_NOT_READY, order_code, expected
-            )
-
-        if await self._transaction_already_used(transaction_id, order_id):
-            return PurchaseResult(
-                PurchaseOutcome.LINK_ALREADY_USED, order_code, expected
-            )
-
-        try:
-            history = await self._provider.recent_incoming(limit=history_limit)
-        except PayPayNetworkError:
-            return PurchaseResult(
-                PurchaseOutcome.PAYMENT_UNKNOWN, order_code, expected
-            )
-        except PayPayError:
-            return PurchaseResult(PurchaseOutcome.FAILED, order_code, expected)
-
-        match = next(
-            (t for t in history if t.transaction_id == transaction_id), None
-        )
-        if match is None:
-            return PurchaseResult(
-                PurchaseOutcome.TRANSACTION_NOT_FOUND, order_code, expected
-            )
-        if not match.incoming:
-            return PurchaseResult(
-                PurchaseOutcome.TRANSACTION_NOT_INCOMING, order_code, expected
-            )
-        if not match.completed:
-            return PurchaseResult(
-                PurchaseOutcome.TRANSACTION_NOT_COMPLETED, order_code, expected
-            )
-        if match.amount != expected:
-            return PurchaseResult(
-                PurchaseOutcome.AMOUNT_MISMATCH, order_code, expected,
-                actual_amount=match.amount,
-            )
-        # The payment must have arrived AFTER the order was placed, so a buyer
-        # cannot point at an unrelated / pre-existing incoming payment of the
-        # same amount. (5 min skew tolerance; skipped only if a timestamp is
-        # genuinely unavailable.)
-        tx_created = self._aware(match.created_at)
-        if (
-            tx_created is not None
-            and order_created is not None
-            and tx_created < order_created - timedelta(minutes=5)
-        ):
-            return PurchaseResult(
-                PurchaseOutcome.TRANSACTION_TOO_OLD, order_code, expected
-            )
-
-        if not await self._claim_transaction(order_id, match):
-            return PurchaseResult(
-                PurchaseOutcome.LINK_ALREADY_USED, order_code, expected
-            )
-
-        await self._set_status(
-            order_id, OrderStatus.PAID, external_payment_id=match.transaction_id
-        )
-        return await self._deliver(
-            order_id, order_code, expected, match.transaction_id
-        )
-
-    async def _transaction_already_used(
-        self, transaction_id: str, this_order_id: int
-    ) -> bool:
-        if not transaction_id:
-            return False
-        async with self._sm() as session:
-            pay = await PaymentRepository(session).find_by_external_id(
-                self._provider.name, transaction_id
-            )
-            return pay is not None and pay.order_id != this_order_id
-
-    async def _claim_transaction(self, order_id: int, tx) -> bool:
-        """Record the transaction against this order. UNIQUE-guarded."""
-        async with self._sm() as session:
-            prepo = PaymentRepository(session)
-            existing = await prepo.get_for_order(order_id)
-            if existing is None:
-                await prepo.create(
-                    order_id=order_id,
-                    provider=self._provider.name,
-                    amount=tx.amount,
-                    paypay_link_id=None,
-                    external_payment_id=tx.transaction_id,
-                    status=PaymentStatus.COMPLETED.value,
-                    raw_response=json.dumps(redact(tx.raw), ensure_ascii=False),
-                )
-            else:
-                existing.external_payment_id = tx.transaction_id
-                existing.amount = tx.amount
-                existing.status = PaymentStatus.COMPLETED.value
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                return False
-            return True
 
     async def reverify_and_settle(
         self, order_id: int, retry_accept: bool = False

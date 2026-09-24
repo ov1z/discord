@@ -9,7 +9,7 @@ import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
-from paypay.models import PaymentInfo, RequestLink, Transaction
+from paypay.models import PaymentInfo
 
 
 class AcceptOutcome(str, enum.Enum):
@@ -50,21 +50,6 @@ class PaymentProvider(ABC):
     async def is_ready(self) -> bool:
         """Whether the provider can currently perform accepts."""
         return True
-
-    supports_requests: bool = False
-
-    async def create_request(self, amount: int) -> RequestLink:
-        """Issue a payment request for *amount*. Only if supports_requests."""
-        raise NotImplementedError
-
-    async def recent_incoming(self, limit: int = 10) -> list[Transaction]:
-        """Most recent transactions, newest first. Only if supports_requests."""
-        raise NotImplementedError
-
-    def looks_like_transaction_id(self, text: str) -> bool:
-        """Whether *text* could be a transaction id the buyer read off PayPay."""
-        stripped = (text or "").strip()
-        return stripped.isdigit() and 8 <= len(stripped) <= 32
 
     def looks_like_link(self, text: str) -> bool:
         """Whether *text* contains something worth sending to the provider.

@@ -17,14 +17,13 @@ from paypay.exceptions import (
     PayPayNetworkError,
     PayPayTemporaryHold,
 )
-from paypay.models import LinkStatus, PaymentInfo, RequestLink, Transaction
+from paypay.models import LinkStatus, PaymentInfo
 
 _LINK_RE = re.compile(r"https?://example\.local/pay/(\d+)/([A-Za-z0-9_-]+)")
 
 
 class MockPaymentProvider(PaymentProvider):
     name = "mock"
-    supports_requests = True
 
     def __init__(self) -> None:
         self._received: set[str] = set()
@@ -34,8 +33,6 @@ class MockPaymentProvider(PaymentProvider):
         self.hold_on_accept: set[str] = set()
         self.fail_accept: set[str] = set()
         self.ready: bool = True
-        self._request_seq = 0
-        self._history: list[Transaction] = []
 
     def _parse(self, url: str) -> tuple[int, str]:
         m = _LINK_RE.match(url.strip())
@@ -48,43 +45,6 @@ class MockPaymentProvider(PaymentProvider):
 
     def looks_like_link(self, text: str) -> bool:
         return bool(_LINK_RE.search(text or ""))
-
-    async def create_request(self, amount: int) -> RequestLink:
-        self._request_seq += 1
-        code = f"REQ{self._request_seq:04d}"
-        return RequestLink(
-            link=f"https://example.local/request/{amount}/{code}",
-            code=code,
-            amount=amount,
-            session_id=code,
-        )
-
-    async def recent_incoming(self, limit: int = 10) -> list[Transaction]:
-        return list(self._history[:limit])
-
-    def add_incoming(
-        self,
-        transaction_id: str,
-        amount: int,
-        *,
-        incoming: bool = True,
-        status: str = "COMPLETED",
-        completed: bool | None = None,
-        created_at=None,
-    ) -> Transaction:
-        """Test hook: put a transaction at the top of the history."""
-        if completed is not None:
-            status = "COMPLETED" if completed else "PENDING"
-        tx = Transaction(
-            transaction_id=transaction_id,
-            amount=amount,
-            incoming=incoming,
-            status=status,
-            order_type="P2P_CODE_RECEPTION" if incoming else "P2PSEND",
-            created_at=created_at,
-        )
-        self._history.insert(0, tx)
-        return tx
 
     async def inspect_payment(self, url: str) -> PaymentInfo:
         amount, link_id = self._parse(url)

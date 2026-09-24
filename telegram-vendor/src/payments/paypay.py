@@ -16,14 +16,13 @@ from paypay.exceptions import (
     PayPayNetworkError,
     PayPayTemporaryHold,
 )
-from paypay.models import LinkStatus, PaymentInfo, RequestLink, Transaction
+from paypay.models import LinkStatus, PaymentInfo
 
 logger = logging.getLogger("payments.paypay")
 
 
 class PayPayPaymentProvider(PaymentProvider):
     name = "paypay"
-    supports_requests = True
 
     def __init__(self, client: PayPayClient) -> None:
         self._client = client
@@ -33,16 +32,6 @@ class PayPayPaymentProvider(PaymentProvider):
 
     def looks_like_link(self, text: str) -> bool:
         return is_paypay_link(text or "")
-
-    async def create_request(self, amount: int) -> RequestLink:
-        link = await self._client.create_request_link(amount)
-        logger.info("payment request issued: amount=%s code=%s", amount, link.code)
-        return link
-
-    async def recent_incoming(self, limit: int = 10) -> list[Transaction]:
-        history = await self._client.payment_history(limit=limit)
-        logger.info("history fetched: %s rows", len(history))
-        return history
 
     async def inspect_payment(self, url: str) -> PaymentInfo:
         info = await self._client.link_check(url)

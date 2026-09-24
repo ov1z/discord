@@ -34,3 +34,5 @@ htmlcov/
 # analysis inputs (may contain secrets)
 tools/samples/
 *.har
+_backup_before_ui_*/
+.last_ui_backup

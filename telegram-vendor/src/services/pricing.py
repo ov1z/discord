@@ -136,11 +136,16 @@ def parse_tiers_text(text: str) -> str | None:
 
 
 def format_tiers(tiers: list[Tier]) -> str:
-    """Human-readable price table for the product detail screen."""
+    """Human-readable price table (per-unit) for the product detail screen."""
+    if len(tiers) == 1:
+        return f"{tiers[0].unit_price:,}円/個"
     lines: list[str] = []
     for t in tiers:
         if t.quantity == 1:
-            lines.append(f"  1個: {t.total:,}円")
+            lines.append(f"  1個〜: {t.unit_price:,}円/個")
         else:
-            lines.append(f"  {t.quantity}個: {t.total:,}円 (@{t.unit_price:,}円)")
+            lines.append(
+                f"  {t.quantity}個〜: {t.unit_price:,}円/個"
+                f"（{t.quantity}個 ¥{t.total:,}）"
+            )
     return "\n".join(lines)

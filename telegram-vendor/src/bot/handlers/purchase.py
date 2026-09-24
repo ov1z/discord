@@ -1,9 +1,4 @@
-"""Buyer pays -> run the payment pipeline -> deliver.
-
-Two ways in, both ending in the same outcome handling:
-  * the buyer pays a payment request we issued and sends its transaction
-    number (used when PAYMENT_FLOW=request);
-  * the buyer creates a send-money link and we accept it (default).
+"""Buyer sends a PayPay send-money link -> we accept it -> deliver.
 
 Everything except the delivered goods renders into the chat's single shop
 message, and the buyer's own messages are removed once read, so a finished
@@ -62,37 +57,6 @@ async def _order_id_from(
     return order_id
 
 
-@router.message(
-    PurchaseStates.WAITING_TRANSACTION_ID, F.text, ~F.text.startswith("/")
-)
-async def on_transaction_id(
-    message: Message, services: Container, state: FSMContext, bot: Bot
-) -> None:
-    chat_id = message.chat.id
-    text = (message.text or "").strip()
-    await screen.delete_silently(message)
-
-    order_id = await _order_id_from(state, bot, chat_id, services)
-    if order_id is None:
-        return
-
-    if services.provider.looks_like_link(text):
-        result = await services.payments.process_payment_link(order_id, text)
-        await _handle_result(bot, chat_id, services, state, order_id, result)
-        return
-
-    if not services.provider.looks_like_transaction_id(text):
-        await _reprompt(
-            bot, chat_id, services, state, order_id,
-            "取引番号を送ってください。\n"
-            "PayPayアプリ → 該当の支払い → 取引詳細 に表示される数字です。",
-        )
-        return
-
-    result = await services.payments.confirm_by_transaction(order_id, text)
-    await _handle_result(bot, chat_id, services, state, order_id, result)
-
-
 @router.message(PurchaseStates.WAITING_PAYPAY_LINK, F.text, ~F.text.startswith("/"))
 async def on_paypay_link(
     message: Message, services: Container, state: FSMContext, bot: Bot
@@ -108,9 +72,9 @@ async def on_paypay_link(
     if not services.provider.looks_like_link(url):
         await _reprompt(
             bot, chat_id, services, state, order_id,
-            "PayPayの送金リンクを送ってください。\n"
-            "アプリで作成したリンクを貼り付けてください"
-            "（メッセージが一緒でも大丈夫です）。",
+            "🔗 PayPayの送金リンクを送ってください。\n"
+            "アプリで作成したリンクを貼り付けるだけでOKです"
+            "（前後に文章が付いていても大丈夫）。",
         )
         return
 
@@ -128,13 +92,13 @@ async def _reprompt(
 ) -> None:
     """Re-render the waiting screen with a hint, keeping it to one message."""
     order = await services.orders.get(order_id)
-    amount = f"{order.price:,}円" if order is not None else "案内した金額"
+    amount = f"¥{order.price:,}" if order is not None else "案内した金額"
     code = order.order_code if order is not None else ""
     await screen.render(
         bot,
         chat_id,
         state,
-        f"{hint}\n\n金額: {amount}\n注文ID: {code}",
+        f"{hint}\n\n💰 お支払い: {amount}\n🧾 注文ID: {code}",
         cancel_purchase_keyboard(code, services.settings.support_url),
     )
 
@@ -163,8 +127,9 @@ async def _handle_result(
         else:
             await screen.render(
                 bot, chat_id, state,
-                "お支払いを確認しました。商品の送信に失敗したため、"
-                "管理者が確認のうえお送りします。",
+                "✅ お支払いを確認しました。\n"
+                "商品の送信に失敗したため、管理者が確認のうえお送りします。"
+                "そのままお待ちください。",
                 error_keyboard(support_url),
             )
             await notify_admin(

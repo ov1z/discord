@@ -11,15 +11,48 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
 
 
-def shop_list_keyboard(products: list[ProductView]) -> InlineKeyboardMarkup:
-    """One button per product; tapping opens the detail (price/stock/quantity)."""
+def _link(text: str, url: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, url=url)
+
+
+def shop_list_keyboard(
+    products: list[ProductView],
+    support_url: str | None = None,
+    channel_url: str | None = None,
+) -> InlineKeyboardMarkup:
+    """One button per product, then a footer of links (channel / support)."""
     rows: list[list[InlineKeyboardButton]] = []
     for p in products:
-        stock = f"在庫{p.available_stock}" if p.available_stock > 0 else "入荷待ち"
-        label = f"{p.name}｜¥{p.price:,}｜{stock}"
+        if p.available_stock > 0:
+            label = f"{p.name} ・ ¥{p.price:,}/個 ・ 在庫{p.available_stock}"
+        else:
+            label = f"{p.name} ・ ¥{p.price:,}/個 ・ 🈳売切"
         rows.append([_btn(label, f"shop:view:{p.id}")])
     if not rows:
         rows.append([_btn("商品はまだありません", "noop")])
+    footer: list[InlineKeyboardButton] = []
+    if channel_url:
+        footer.append(_link("📣 販売CH", channel_url))
+    if support_url:
+        footer.append(_link("💬 サポート", support_url))
+    if footer:
+        rows.append(footer)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def agreement_keyboard(
+    product_id: int,
+    quantity: int,
+    terms_url: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Consent gate shown before payment: agree / change quantity / cancel."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [_btn("✅ 同意して購入手続きへ", f"shop:agree:{product_id}:{quantity}")],
+    ]
+    if terms_url:
+        rows.append([_link("📄 利用規約", terms_url)])
+    rows.append([_btn("◀️ 数量を選び直す", f"shop:view:{product_id}")])
+    rows.append([_btn("❌ キャンセル", "shop:list")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -40,11 +73,11 @@ def product_detail_keyboard(view: ProductView) -> InlineKeyboardMarkup:
                 continue
             total = pricing.total_for(qty, tiers)
             if qty == 1:
-                label = f"{qty}個 ({total:,}円)"
+                label = f"🛒 1個 ・ ¥{total:,}"
             else:
                 unit = pricing.unit_price_for(qty, tiers)
-                label = f"{qty}個 ({total:,}円 / @{unit:,}円)"
+                label = f"🛒 {qty}個 ・ ¥{total:,} (@¥{unit:,})"
             rows.append([_btn(label, f"shop:buy:{view.id}:{qty}")])
-        rows.append([_btn("🔢 数量を入力", f"shop:qty:{view.id}")])
-    rows.append([_btn("◀️ 商品一覧に戻る", "shop:list")])
+        rows.append([_btn("🔢 数量を入力して買う", f"shop:qty:{view.id}")])
+    rows.append([_btn("◀️ 一覧に戻る", "shop:list")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

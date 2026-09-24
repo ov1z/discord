@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from aiogram import Bot
 
 from bot.container import Container
-from bot.keyboards.purchase import support_keyboard
+from bot.keyboards.purchase import delivered_keyboard
 from services.payment_service import PurchaseOutcome, PurchaseResult
 
 logger = logging.getLogger("bot.payment")
@@ -52,26 +52,28 @@ async def deliver_to_buyer(
             product_notes = product.notes
 
     if len(contents) == 1:
-        goods = f"商品（タップでコピー）:\n{_code(contents[0])}"
+        goods = f"🎁 商品（タップでコピー）\n{_code(contents[0])}"
     else:
         body = "\n".join(
             f"{i}. {_code(c)}" for i, c in enumerate(contents, 1)
         )
-        goods = f"商品 {len(contents)}個（タップでコピー）:\n{body}"
+        goods = f"🎁 商品 {len(contents)}個（タップでコピー）\n{body}"
+    title = f"✅ 購入ありがとうございました！" + (f"\n{product_name}" if product_name else "")
     text = (
-        "購入ありがとうございます。\n\n"
+        f"{title}\n"
+        "━━━━━━━━━━━━━━\n"
         f"{goods}\n\n"
-        f"注文ID: {_code(result.order_code)}\n"
-        f"決済金額: {result.expected_amount:,}円"
+        f"🧾 注文ID: {_code(result.order_code)}\n"
+        f"💰 金額: ¥{result.expected_amount:,}"
     )
     if product_notes and product_notes.strip():
-        text += f"\n\n⚠️ 注意事項:\n{html.escape(product_notes.strip())}"
+        text += f"\n\n⚠️ 注意事項\n{html.escape(product_notes.strip())}"
     try:
         await bot.send_message(
             buyer_chat_id,
             text,
             parse_mode="HTML",
-            reply_markup=support_keyboard(container.settings.support_url),
+            reply_markup=delivered_keyboard(container.settings.support_url),
         )
     except Exception:
         logger.warning(
@@ -221,20 +223,21 @@ def buyer_message_for(result: PurchaseResult) -> str | None:
     """Non-success buyer-facing messages. None -> handled elsewhere."""
     o = result.outcome
     if o == PurchaseOutcome.AMOUNT_MISMATCH:
+        actual = f"（送られた額: ¥{result.actual_amount:,}）" if result.actual_amount else ""
         return (
-            "送金金額が一致しません。\n"
-            f"必要金額: {result.expected_amount}円"
+            f"⚠️ 金額が違います{actual}\n"
+            f"¥{result.expected_amount:,} ちょうどの送金リンクを作り直して送ってください。"
         )
     if o == PurchaseOutcome.INVALID_LINK:
-        return ("有効なPayPayリンクではありません。\n"
+        return ("⚠️ PayPayの送金リンクとして読み取れませんでした。\n"
                 "PayPayアプリで作成した送金リンクを貼り付けてください。")
     if o == PurchaseOutcome.LINK_ALREADY_USED:
         return (
-            "この支払いはすでに別の注文で使用されています。\n"
-            "新しくお支払いのうえ、その取引番号を送ってください。"
+            "⚠️ この送金リンクはすでに使用済みです。\n"
+            "新しく送金リンクを作成して送ってください。"
         )
     if o == PurchaseOutcome.NOT_ACCEPTABLE:
-        return ("このリンクは受け取れません（受取済み、または期限切れの可能性）。\n"
+        return ("⚠️ このリンクは受け取れません（受取済み、または期限切れの可能性）。\n"
                 "新しい送金リンクを作成して送ってください。")
     if o == PurchaseOutcome.ORDER_EXPIRED:
         return "注文の有効期限が切れました。\n/start からもう一度購入してください。"
@@ -255,29 +258,6 @@ def buyer_message_for(result: PurchaseResult) -> str | None:
     if o == PurchaseOutcome.FAILED:
         return ("決済の受け取りに失敗しました。入金は成立していません。\n"
                 "管理者に通知済みです。/start からやり直してください。")
-    if o == PurchaseOutcome.TRANSACTION_NOT_FOUND:
-        return (
-            "その取引番号は、こちらの直近の入金履歴に見つかりませんでした。\n"
-            "・支払いが完了しているか\n"
-            "・番号が正しいか（取引詳細の番号です）\n"
-            "を確認してもう一度送ってください。\n"
-            "反映に少し時間がかかることがあります。"
-        )
-    if o == PurchaseOutcome.TRANSACTION_NOT_INCOMING:
-        return (
-            "その取引は入金として確認できませんでした。\n"
-            "案内した請求リンクから支払った取引の番号を送ってください。"
-        )
-    if o == PurchaseOutcome.TRANSACTION_NOT_COMPLETED:
-        return (
-            "その取引はまだ完了していません。\n"
-            "支払いが完了してからもう一度送ってください。"
-        )
-    if o == PurchaseOutcome.TRANSACTION_TOO_OLD:
-        return (
-            "その取引はこの注文より前のものです。\n"
-            "この注文用に新しくお支払いいただいた取引番号を送ってください。"
-        )
     if o == PurchaseOutcome.ORDER_NOT_WAITING:
         return "この注文はすでに処理が終わっています。\n/start から選び直してください。"
     if o == PurchaseOutcome.DELIVERED:

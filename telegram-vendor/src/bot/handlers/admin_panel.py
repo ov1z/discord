@@ -100,8 +100,11 @@ async def cb_add_product(callback: CallbackQuery, services: Container, state: FS
     await _show(
         callback,
         "➕ 追加する商品を次の形式で送ってください:\n\n"
-        "名前|価格|説明\n\n"
-        "例: 商品A|500|プレミアムコード",
+        "商品名 | 価格 | 説明（任意）\n\n"
+        "例: Twitterアカウント | 1800 | 2026年作成の高品質アカウント\n\n"
+        "・「|」で区切ります（説明は省略可）\n"
+        "・価格は数字だけ（円）\n"
+        "・説明はあとから「📄 商品説明」でも変更できます",
         kb.cancel_input_keyboard("ap:products"),
     )
     await callback.answer()

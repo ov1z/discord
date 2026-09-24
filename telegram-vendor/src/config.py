@@ -31,12 +31,14 @@ class Settings(BaseSettings):
     )
 
     payment_provider: str = Field(default="mock", alias="PAYMENT_PROVIDER")
-    payment_flow: str = Field(default="link", alias="PAYMENT_FLOW")
 
     # PayPay通信だけを通すProxy（例: http://user:pass@host:port）。空なら直接接続。
     paypay_proxy: str = Field(default="", alias="PAYPAY_PROXY")
 
     support_contact: str = Field(default="@anonxdev", alias="SUPPORT_CONTACT")
+    # Optional links shown as buttons. Empty = button hidden.
+    sales_channel: str = Field(default="", alias="SALES_CHANNEL")
+    terms_url: str = Field(default="", alias="TERMS_URL")
 
     order_ttl_seconds: int = Field(default=600, alias="ORDER_TTL_SECONDS")
     hold_recheck_seconds: int = Field(default=60, alias="HOLD_RECHECK_SECONDS")
@@ -52,9 +54,24 @@ class Settings(BaseSettings):
             return handle
         return f"https://t.me/{handle}"
 
+    @staticmethod
+    def _as_url(value: str, tme_prefix: bool) -> str | None:
+        v = value.strip()
+        if not v:
+            return None
+        if v.startswith("http://") or v.startswith("https://"):
+            return v
+        if tme_prefix:
+            return f"https://t.me/{v.lstrip('@')}"
+        return v
+
     @property
-    def uses_payment_requests(self) -> bool:
-        return self.payment_flow.strip().lower() == "request"
+    def sales_channel_url(self) -> str | None:
+        return self._as_url(self.sales_channel, tme_prefix=True)
+
+    @property
+    def terms_link(self) -> str | None:
+        return self._as_url(self.terms_url, tme_prefix=False)
 
     @property
     def is_sqlite(self) -> bool:
